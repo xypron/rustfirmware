@@ -6,6 +6,7 @@
 
 use core::str;
 
+use crate::partition::{PartitionEntry, PartitionTable};
 use crate::virtio::{BlockDevice, VIRTIO_SECTOR_SIZE};
 
 /// GPT header signature stored at the start of the primary header sector.
@@ -53,6 +54,26 @@ pub struct GptPartitionEntry {
     pub attributes: u64,
     /// UTF-16LE partition name as stored in the GPT entry.
     partition_name: [u16; GPT_PARTITION_NAME_LEN],
+}
+
+/// GPT-backed partition table implementation.
+pub struct GptPartitionTable<'a, D: BlockDevice> {
+    /// Device containing the GPT metadata and partition-entry array.
+    device: &'a mut D,
+    /// Parsed primary header used to locate partition entries.
+    header: GptHeader,
+}
+
+impl<'a, D: BlockDevice> GptPartitionTable<'a, D> {
+    /// Creates a GPT partition table view from the primary header.
+    ///
+    /// # Parameters
+    ///
+    /// - `device`: Sector-addressable block device containing the GPT.
+    pub fn new(device: &'a mut D) -> Option<Self> {
+        let header = read_primary_header(device)?;
+        Some(Self { device, header })
+    }
 }
 
 /// Reads the primary GPT header from LBA 1.
@@ -195,6 +216,11 @@ impl GptPartitionEntry {
         self.guid(buffer)
     }
 
+    /// Formats the raw partition-type GUID as a canonical string.
+    ///
+    /// # Parameters
+    ///
+    /// - `buffer`: Scratch buffer that receives the formatted GUID text.
     fn guid<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
         /// Hex digit lookup table used when formatting GUID bytes.
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -227,11 +253,119 @@ impl GptPartitionEntry {
     }
 }
 
+impl PartitionEntry for GptPartitionEntry {
+    /// Returns `true` when the GPT slot is populated.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn is_present(&self) -> bool {
+        !self.is_unused()
+    }
+
+    /// Returns the first logical block address of the partition.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn first_lba(&self) -> u64 {
+        self.first_lba
+    }
+
+    /// Returns the last logical block address of the partition.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn last_lba(&self) -> u64 {
+        self.last_lba
+    }
+
+    /// Returns the number of sectors covered by the partition.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn sector_count(&self) -> u64 {
+        GptPartitionEntry::sector_count(self)
+    }
+
+    /// Returns `true` when the legacy BIOS bootable attribute is set.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn bootable(&self) -> bool {
+        GptPartitionEntry::bootable(self)
+    }
+
+    /// Returns `true` when the partition type GUID is the ESP GUID.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn is_efi_system_partition(&self) -> bool {
+        self.partition_type_guid == GPT_TYPE_GUID_ESP
+    }
+
+    /// Formats the partition label into the provided scratch buffer.
+    ///
+    /// # Parameters
+    ///
+    /// - `buffer`: Scratch buffer that receives the partition label.
+    fn label<'a>(&self, buffer: &'a mut [u8; 72]) -> &'a str {
+        GptPartitionEntry::label(self, buffer)
+    }
+
+    /// Formats the partition type into the provided scratch buffer.
+    ///
+    /// # Parameters
+    ///
+    /// - `buffer`: Scratch buffer that receives the partition type.
+    fn partition_type<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
+        GptPartitionEntry::partition_type(self, buffer)
+    }
+}
+
+impl<D: BlockDevice> PartitionTable for GptPartitionTable<'_, D> {
+    type Entry = GptPartitionEntry;
+
+    /// Returns the number of GPT partition-entry slots.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
+    fn partition_count(&self) -> u32 {
+        self.header.partition_entry_count
+    }
+
+    /// Reads one GPT partition entry by zero-based index.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: Zero-based partition entry index to decode.
+    fn partition(&mut self, index: u32) -> Option<Self::Entry> {
+        read_partition_entry(self.device, &self.header, index)
+    }
+}
+
+/// Reads one little-endian `u32` from `bytes`.
+///
+/// # Parameters
+///
+/// - `bytes`: Byte slice containing the encoded value.
+/// - `offset`: Starting byte offset of the value.
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let data = bytes.get(offset..offset + 4)?;
     Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 
+/// Reads one little-endian `u64` from `bytes`.
+///
+/// # Parameters
+///
+/// - `bytes`: Byte slice containing the encoded value.
+/// - `offset`: Starting byte offset of the value.
 fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     let data = bytes.get(offset..offset + 8)?;
     Some(u64::from_le_bytes([
@@ -239,6 +373,12 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
+/// Copies 16 bytes from `bytes` starting at `offset`.
+///
+/// # Parameters
+///
+/// - `bytes`: Byte slice containing the source data.
+/// - `offset`: Starting byte offset of the 16-byte field.
 fn copy_16(bytes: &[u8], offset: usize) -> Option<[u8; 16]> {
     let data = bytes.get(offset..offset + 16)?;
     let mut value = [0u8; 16];

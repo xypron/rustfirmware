@@ -12,6 +12,10 @@
 pub mod virtio;
 /// GUID partition table parsing for block devices.
 pub mod gpt;
+/// Generic partition-table interfaces for GPT and future MBR support.
+pub mod partition;
+/// Read-only FAT filesystem support for loading files by path.
+pub mod fat;
 /// Flattened device tree parsing helpers used for diagnostics and future edits.
 pub mod devicetree;
 /// Firmware diagnostics output and reporting.
@@ -24,8 +28,10 @@ use core::panic::PanicInfo;
 use core::ptr;
 use core::str;
 use diagnostics::print_diagnostics;
-use gpt::{read_partition_entry, read_primary_header};
-use virtio::qemu_virt_block_devices;
+use fat::FatVolume;
+use gpt::GptPartitionTable;
+use partition::{PartitionEntry, PartitionTable};
+use virtio::{qemu_virt_block_devices, BlockDevice};
 use virtio::VirtioBlockDriver;
 
 unsafe extern "C" {
@@ -307,6 +313,37 @@ fn put_bool(value: bool) {
     }
 }
 
+/// Mounts one FAT ESP and prints every file path plus size.
+///
+/// # Parameters
+///
+/// - `device`: Block device that contains the ESP.
+/// - `partition_start_lba`: First logical block of the ESP.
+fn list_esp_files<D: BlockDevice>(
+    device: &mut D,
+    partition_start_lba: u64,
+) {
+    let mut volume = match FatVolume::new(device, partition_start_lba) {
+        Ok(volume) => volume,
+        Err(_) => {
+            let _ = puts("fat: failed to mount esp\n");
+            return;
+        }
+    };
+
+    let result = volume.walk_files(|path, size| {
+        let _ = puts("fat: file '");
+        let _ = puts(path);
+        let _ = puts("', size=");
+        put_decimal_u64(size as u64);
+        let _ = puts("\n");
+    });
+
+    if result.is_err() {
+        let _ = puts("fat: failed to walk esp files\n");
+    }
+}
+
 /// Probes QEMU VirtIO block devices and prints GPT partition information.
 ///
 /// # Parameters
@@ -331,24 +368,25 @@ fn probe_virtio() {
             }
         };
 
-        let header = match read_primary_header(&mut driver) {
-            Some(header) => header,
+        let mut partitions = match GptPartitionTable::new(&mut driver) {
+            Some(partitions) => partitions,
             None => {
                 let _ = puts("gpt: no primary GPT header\n");
                 continue;
             }
         };
 
+        let partition_count = partitions.partition_count();
         let mut partition_index = 0;
-        while partition_index < header.partition_entry_count {
-            let partition = match read_partition_entry(&mut driver, &header, partition_index) {
+        while partition_index < partition_count {
+            let partition = match partitions.partition(partition_index) {
                 Some(partition) => partition,
                 None => break,
             };
 
             partition_index += 1;
 
-            if partition.is_unused() {
+            if !partition.is_present() {
                 continue;
             }
 
@@ -358,7 +396,7 @@ fn probe_virtio() {
             let _ = puts("partition ");
             put_decimal_u64(partition_index as u64);
             let _ = puts(": start=");
-            put_decimal_u64(partition.first_lba);
+            put_decimal_u64(partition.first_lba());
             let _ = puts(", size=");
             put_decimal_u64(partition.sector_count());
             let _ = puts(", label='");
@@ -368,6 +406,21 @@ fn probe_virtio() {
             let _ = puts("', bootflag=");
             put_bool(partition.bootable());
             let _ = puts("\n");
+
+            if partition.is_efi_system_partition() {
+                let partition_start_lba = partition.first_lba();
+                let _ = puts("fat: walking esp files\n");
+                drop(partitions);
+                list_esp_files(&mut driver, partition_start_lba);
+
+                partitions = match GptPartitionTable::new(&mut driver) {
+                    Some(partitions) => partitions,
+                    None => {
+                        let _ = puts("gpt: failed to reopen partition table\n");
+                        break;
+                    }
+                };
+            }
         }
     }
 
