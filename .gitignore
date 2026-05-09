@@ -1,4 +1,6 @@
 /target
 /build
 /test.img*
+/vmlinu*
+/initrd*
 /.*.swp
