@@ -1,3 +1,4 @@
+HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 TARGET := riscv64imac-unknown-none-elf
 PROFILE ?= release
 PACKAGE := rustfimware
@@ -20,7 +21,7 @@ QEMU_NETDEV_FLAGS := -netdev user,id=$(QEMU_NETDEV_ID)
 QEMU_VIRTIO_NET_FLAGS := -device virtio-net-device,netdev=$(QEMU_NETDEV_ID)
 QEMU_GDB_PORT := 1234
 
-.PHONY: all build docs check debug clean
+.PHONY: all build docs check debug clean gpt-test
 
 all: $(BIN)
 
@@ -72,6 +73,9 @@ debug: $(BIN) test.img
 		-kernel $(BIN) \
 		-drive file=test.img,format=raw,id=drv0,if=none \
 		-device virtio-blk-device,drive=drv0,bus=$(QEMU_VIRTIO_MMIO_BUS),bootindex=1
+
+gpt-test:
+	cargo run --target $(HOST_TARGET) --bin gpt_test -- $(ARGS)
 
 clean:
 	cargo clean
