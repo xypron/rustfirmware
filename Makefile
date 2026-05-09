@@ -21,7 +21,7 @@ QEMU_NETDEV_FLAGS := -netdev user,id=$(QEMU_NETDEV_ID)
 QEMU_VIRTIO_NET_FLAGS := -device virtio-net-device,netdev=$(QEMU_NETDEV_ID)
 QEMU_GDB_PORT := 1234
 
-.PHONY: all build docs check debug clean gpt-test
+.PHONY: all build docs check debug clean gpt-test fat-test
 
 all: $(BIN)
 
@@ -76,6 +76,9 @@ debug: $(BIN) test.img
 
 gpt-test:
 	cargo run --target $(HOST_TARGET) --bin gpt_test -- $(ARGS)
+
+fat-test:
+	cargo run --target $(HOST_TARGET) --bin fat_test -- $(ARGS)
 
 clean:
 	cargo clean
