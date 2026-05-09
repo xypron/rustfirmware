@@ -127,6 +127,9 @@ pub enum VirtioError {
 
 /// Minimal block-device abstraction used by the GPT parser.
 pub trait BlockDevice {
+    /// Returns the total number of 512-byte sectors exposed by the device.
+    fn sector_count(&self) -> u64;
+
     /// Reads one or more contiguous 512-byte sectors into `buffer`.
     ///
     /// # Parameters
@@ -190,6 +193,8 @@ pub struct QemuVirtBlockDevices {
 pub struct VirtioBlockDriver {
     /// Transport handle for the underlying MMIO device.
     device: VirtioMmioDevice,
+    /// Total number of 512-byte sectors reported by the device.
+    capacity_sectors: u64,
     /// Guest-memory view of the configured request queue.
     queue: VirtQueue,
     /// Next available-ring index to publish.
@@ -376,6 +381,30 @@ impl VirtioMmioDevice {
         self.read_reg(MMIO_CONFIG_GENERATION)
     }
 
+    /// Reads one little-endian `u64` from the device-specific configuration area.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Byte offset within the device-specific configuration area.
+    pub fn read_config_u64_le(&self, offset: usize) -> u64 {
+        loop {
+            let before = self.config_generation();
+            let mut bytes = [0u8; 8];
+
+            let mut index = 0usize;
+            while index < bytes.len() {
+                bytes[index] = unsafe {
+                    ptr::read_volatile(self.base.as_ptr().add(0x100 + offset + index))
+                };
+                index += 1;
+            }
+
+            if before == self.config_generation() {
+                return u64::from_le_bytes(bytes);
+            }
+        }
+    }
+
     fn read_reg(&self, offset: usize) -> u32 {
         unsafe { ptr::read_volatile(self.register_ptr(offset)) }
     }
@@ -450,6 +479,8 @@ impl VirtioBlockDriver {
             return Err(VirtioError::NotBlockDevice);
         }
 
+        let capacity_sectors = device.read_config_u64_le(0);
+
         device.reset();
         device.add_status(VIRTIO_STATUS_ACKNOWLEDGE);
         device.add_status(VIRTIO_STATUS_DRIVER);
@@ -496,6 +527,7 @@ impl VirtioBlockDriver {
 
         Ok(Self {
             device,
+            capacity_sectors,
             queue,
             avail_idx: 0,
             used_idx: 0,
@@ -504,6 +536,10 @@ impl VirtioBlockDriver {
 }
 
 impl BlockDevice for VirtioBlockDriver {
+    fn sector_count(&self) -> u64 {
+        self.capacity_sectors
+    }
+
     fn read_blocks(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), VirtioError> {
         if buffer.is_empty() || (buffer.len() % VIRTIO_SECTOR_SIZE) != 0 {
             return Err(VirtioError::InvalidBufferLength);

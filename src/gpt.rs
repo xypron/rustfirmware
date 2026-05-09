@@ -4,6 +4,7 @@
 //! a sector-addressable block device. It is intentionally small and currently
 //! only supports the data needed by the firmware diagnostics output.
 
+use core::cmp::min;
 use core::str;
 
 use crate::partition::{PartitionEntry, PartitionTable};
@@ -11,6 +12,26 @@ use crate::virtio::{BlockDevice, VIRTIO_SECTOR_SIZE};
 
 /// GPT header signature stored at the start of the primary header sector.
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
+/// Minimum supported GPT header size in bytes.
+const GPT_HEADER_MIN_SIZE: usize = 92;
+/// Offset of the GPT header CRC32 field.
+const GPT_HEADER_CRC_OFFSET: usize = 16;
+/// Offset of the current-header-LBA field.
+const GPT_HEADER_LBA_OFFSET: usize = 24;
+/// Offset of the backup-header-LBA field.
+const GPT_BACKUP_LBA_OFFSET: usize = 32;
+/// Offset of the first usable LBA field.
+const GPT_FIRST_USABLE_LBA_OFFSET: usize = 40;
+/// Offset of the last usable LBA field.
+const GPT_LAST_USABLE_LBA_OFFSET: usize = 48;
+/// Offset of the partition entry array starting LBA.
+const GPT_PARTITION_ENTRY_LBA_OFFSET: usize = 72;
+/// Offset of the partition entry count.
+const GPT_PARTITION_ENTRY_COUNT_OFFSET: usize = 80;
+/// Offset of the partition entry size.
+const GPT_PARTITION_ENTRY_SIZE_OFFSET: usize = 84;
+/// Offset of the partition entry array CRC32.
+const GPT_PARTITION_ENTRY_ARRAY_CRC_OFFSET: usize = 88;
 /// Number of UTF-16 code units stored in the GPT partition name field.
 const GPT_PARTITION_NAME_LEN: usize = 36;
 /// Minimum supported GPT partition entry size in bytes.
@@ -71,7 +92,8 @@ impl<'a, D: BlockDevice> GptPartitionTable<'a, D> {
     ///
     /// - `device`: Sector-addressable block device containing the GPT.
     pub fn new(device: &'a mut D) -> Option<Self> {
-        let header = read_primary_header(device)?;
+        let header = read_primary_header(device)
+            .or_else(|| read_backup_header(device))?;
         Some(Self { device, header })
     }
 }
@@ -82,23 +104,113 @@ impl<'a, D: BlockDevice> GptPartitionTable<'a, D> {
 ///
 /// - `device`: Sector-addressable block device containing the GPT.
 pub fn read_primary_header<D: BlockDevice>(device: &mut D) -> Option<GptHeader> {
+    read_header_at(device, 1)
+}
+
+/// Reads the backup GPT header from the last sector of the device.
+fn read_backup_header<D: BlockDevice>(device: &mut D) -> Option<GptHeader> {
+    let last_sector = device.sector_count().checked_sub(1)?;
+    read_header_at(device, last_sector)
+}
+
+/// Reads and validates one GPT header at an explicit LBA.
+fn read_header_at<D: BlockDevice>(device: &mut D, header_lba: u64) -> Option<GptHeader> {
     let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
-    device.read_blocks(1, &mut sector).ok()?;
+    device.read_blocks(header_lba, &mut sector).ok()?;
 
     if &sector[0..8] != GPT_SIGNATURE {
         return None;
     }
 
-    let entry_size = read_u32(&sector, 84)?;
-    if entry_size < GPT_ENTRY_MIN_SIZE as u32 {
+    let header_size = read_u32(&sector, 12)? as usize;
+    if !(GPT_HEADER_MIN_SIZE..=VIRTIO_SECTOR_SIZE).contains(&header_size) {
+        return None;
+    }
+
+    let header_crc = read_u32(&sector, GPT_HEADER_CRC_OFFSET)?;
+    let mut header_bytes = [0u8; VIRTIO_SECTOR_SIZE];
+    header_bytes[..header_size].copy_from_slice(&sector[..header_size]);
+    header_bytes[GPT_HEADER_CRC_OFFSET..GPT_HEADER_CRC_OFFSET + 4]
+        .copy_from_slice(&[0u8; 4]);
+    if crc32(&header_bytes[..header_size]) != header_crc {
+        return None;
+    }
+
+    let current_lba = read_u64(&sector, GPT_HEADER_LBA_OFFSET)?;
+    if current_lba != header_lba {
+        return None;
+    }
+
+    let backup_lba = read_u64(&sector, GPT_BACKUP_LBA_OFFSET)?;
+    if backup_lba >= device.sector_count() || backup_lba == current_lba {
+        return None;
+    }
+
+    let first_usable_lba = read_u64(&sector, GPT_FIRST_USABLE_LBA_OFFSET)?;
+    let last_usable_lba = read_u64(&sector, GPT_LAST_USABLE_LBA_OFFSET)?;
+    if first_usable_lba > last_usable_lba || last_usable_lba >= device.sector_count() {
+        return None;
+    }
+
+    let partition_entry_lba = read_u64(&sector, GPT_PARTITION_ENTRY_LBA_OFFSET)?;
+    let partition_entry_count = read_u32(&sector, GPT_PARTITION_ENTRY_COUNT_OFFSET)?;
+    let entry_size = read_u32(&sector, GPT_PARTITION_ENTRY_SIZE_OFFSET)?;
+    if partition_entry_count == 0
+        || entry_size < GPT_ENTRY_MIN_SIZE as u32
+        || (entry_size % GPT_ENTRY_MIN_SIZE as u32) != 0
+    {
+        return None;
+    }
+
+    let entry_array_bytes = u64::from(partition_entry_count).checked_mul(u64::from(entry_size))?;
+    let entry_array_sectors = entry_array_bytes.div_ceil(VIRTIO_SECTOR_SIZE as u64);
+    let entry_array_end_lba = partition_entry_lba.checked_add(entry_array_sectors)?;
+    if partition_entry_lba == 0 || entry_array_end_lba > device.sector_count() {
+        return None;
+    }
+
+    if header_lba >= partition_entry_lba && header_lba < entry_array_end_lba {
+        return None;
+    }
+
+    let entry_array_crc = read_u32(&sector, GPT_PARTITION_ENTRY_ARRAY_CRC_OFFSET)?;
+    if entry_array_crc != validate_entry_array_crc(device, partition_entry_lba, entry_array_bytes, entry_array_crc)? {
         return None;
     }
 
     Some(GptHeader {
-        partition_entry_lba: read_u64(&sector, 72)?,
-        partition_entry_count: read_u32(&sector, 80)?,
+        partition_entry_lba,
+        partition_entry_count,
         partition_entry_size: entry_size,
     })
+}
+
+/// Computes the CRC32 of the GPT entry array and returns it.
+fn validate_entry_array_crc<D: BlockDevice>(
+    device: &mut D,
+    start_lba: u64,
+    byte_len: u64,
+    expected_crc: u32,
+) -> Option<u32> {
+    let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
+    let mut current_lba = start_lba;
+    let mut remaining = usize::try_from(byte_len).ok()?;
+    let mut crc = 0u32;
+
+    while remaining != 0 {
+        device.read_blocks(current_lba, &mut sector).ok()?;
+        let take = min(remaining, VIRTIO_SECTOR_SIZE);
+        crc = crc32_update(crc, &sector[..take]);
+        remaining -= take;
+        current_lba = current_lba.checked_add(1)?;
+    }
+
+    let computed = crc32_finalize(crc);
+    if computed == expected_crc {
+        Some(computed)
+    } else {
+        None
+    }
 }
 
 /// Reads one GPT partition entry by index.
@@ -384,4 +496,38 @@ fn copy_16(bytes: &[u8], offset: usize) -> Option<[u8; 16]> {
     let mut value = [0u8; 16];
     value.copy_from_slice(data);
     Some(value)
+}
+
+/// Computes one GPT-style IEEE CRC32 over `bytes`.
+fn crc32(bytes: &[u8]) -> u32 {
+    crc32_finalize(crc32_update(0, bytes))
+}
+
+/// Updates an in-progress IEEE CRC32 with `bytes`.
+fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    crc = !crc;
+
+    let mut index = 0usize;
+    while index < bytes.len() {
+        crc ^= u32::from(bytes[index]);
+
+        let mut bit = 0usize;
+        while bit < 8 {
+            if (crc & 1) != 0 {
+                crc = (crc >> 1) ^ 0xedb8_8320;
+            } else {
+                crc >>= 1;
+            }
+            bit += 1;
+        }
+
+        index += 1;
+    }
+
+    !crc
+}
+
+/// Finalizes one in-progress CRC32 state.
+fn crc32_finalize(crc: u32) -> u32 {
+    crc
 }

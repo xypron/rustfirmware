@@ -9,7 +9,9 @@ UBUNTU_IMG_URL := https://cdimage.ubuntu.com/releases/jammy/release/ubuntu-22.04
 OBJCOPY := $(shell command -v rust-objcopy 2>/dev/null || command -v llvm-objcopy 2>/dev/null)
 QEMU := qemu-system-riscv64
 QEMU_MACHINE := virt
+QEMU_CPU := rva23s64
 QEMU_FLAGS := -nographic
+QEMU_SMP := 2
 QEMU_MEMORY := 1G
 QEMU_VIRTIO_MMIO_BUS := virtio-mmio-bus.0
 QEMU_VIRTIO_MMIO_FLAGS := -global virtio-mmio.force-legacy=false
@@ -44,6 +46,8 @@ test.img:
 check: $(BIN) test.img
 	$(QEMU) \
 		-M $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp $(QEMU_SMP) \
 		-m $(QEMU_MEMORY) \
 		$(QEMU_FLAGS) \
 		$(QEMU_VIRTIO_MMIO_FLAGS) \
@@ -56,6 +60,8 @@ check: $(BIN) test.img
 debug: $(BIN) test.img
 	$(QEMU) \
 		-M $(QEMU_MACHINE) \
+		-cpu $(QEMU_CPU) \
+		-smp $(QEMU_SMP) \
 		-m $(QEMU_MEMORY) \
 		$(QEMU_FLAGS) \
 		$(QEMU_VIRTIO_MMIO_FLAGS) \
