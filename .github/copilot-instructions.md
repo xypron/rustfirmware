@@ -8,6 +8,8 @@
 - At entry, register `a1` contains a pointer to the device tree.
 - Save `a0` and `a1` so they can be passed on to the payload.
 - For git commits in this repository, use the global Git user settings.
+- Prefer a maximum line length of 80 characters in both code and
+	documentation.
 - Add rustdoc comments for every module, static, constant, type alias, enum, struct, function, and method, including non-public helpers.
 - Document every function and method parameter, and document every struct field.
 - Place each rustdoc block immediately above the item it documents.

@@ -6,7 +6,8 @@ Freestanding RISC-V firmware written in Rust.
 Project constraints
 -------------------
 
-- This is freestanding software. Do not use system libraries or ``std``.
+- This is freestanding software. Do not use system libraries or
+   ``std``.
 - Compile for the ``riscv64`` architecture.
 - The load address is ``0x80200000``.
 - At entry, register ``a0`` contains the boot hart ID.
@@ -21,7 +22,8 @@ Install the required Ubuntu packages:
 .. code-block:: bash
 
    sudo apt update
-   sudo apt install -y make rustup llvm lld binutils-riscv64-unknown-elf curl xz-utils
+   sudo apt install -y make rustup llvm lld \
+      binutils-riscv64-unknown-elf curl xz-utils
 
 Initialize Rust and add the target:
 
@@ -35,7 +37,8 @@ Optional tools:
 - ``qemu-system-misc`` for boot testing in QEMU
 - ``gdb-multiarch`` for debugging
 
-If you want ``rust-objcopy`` instead of relying on ``llvm-objcopy``, install:
+If you want ``rust-objcopy`` instead of relying on
+``llvm-objcopy``, install:
 
 .. code-block:: bash
 
@@ -62,7 +65,8 @@ Generate API documentation:
 Run in QEMU
 -----------
 
-Boot the raw firmware image with QEMU. The first run downloads the Ubuntu 22.04.5 RISC-V server image and extracts it to ``test.img``:
+Boot the raw firmware image with QEMU. The first run downloads the
+Ubuntu 22.04.5 RISC-V server image and extracts it to ``test.img``:
 
 .. code-block:: bash
 
@@ -77,7 +81,8 @@ Start QEMU halted at reset and listen for GDB on TCP port ``1234``:
 
    make debug
 
-In another terminal, connect with ``gdb-multiarch`` using the ELF image for symbols:
+In another terminal, connect with ``gdb-multiarch`` using the ELF image
+for symbols:
 
 .. code-block:: bash
 
