@@ -3,7 +3,7 @@ ENTRY(_start)
 
 MEMORY
 {
-    RAM (rwx) : ORIGIN = 0x80200000, LENGTH = 256K
+    RAM (rwx) : ORIGIN = 0x0, LENGTH = 256K
 }
 
 __stack_size = 16K + 128K;
@@ -42,7 +42,7 @@ SECTIONS
     __firmware_data_end = .;
     __heap_start = .;
     __heap_end = ORIGIN(RAM) + LENGTH(RAM);
-    __stack_top = ORIGIN(RAM);
+    __stack_top = ORIGIN(RAM) + LENGTH(RAM);
     __stack_bottom = __stack_top - __stack_size;
 
     /DISCARD/ :

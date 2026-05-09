@@ -8,6 +8,7 @@
 //! conventional memory and then carved by reserved regions from the device-tree
 //! reserve map and `/reserved-memory` subtree.
 
+use core::arch::asm;
 use core::cmp::{max, min};
 
 use crate::devicetree::{Fdt, MemoryRegion};
@@ -177,29 +178,29 @@ impl<'a> PageAllocator<'a> {
 
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__firmware_code_start)),
-                symbol_address(core::ptr::addr_of!(__firmware_code_end)),
+                firmware_code_start(),
+                firmware_code_end(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesCode,
         )?;
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__firmware_data_start)),
-                symbol_address(core::ptr::addr_of!(__firmware_data_end)),
+                firmware_data_start(),
+                firmware_data_end(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesData,
         )?;
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__heap_start)),
-                symbol_address(core::ptr::addr_of!(__heap_end)),
+                firmware_heap_start(),
+                firmware_heap_end(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesData,
         )?;
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__stack_bottom)),
-                symbol_address(core::ptr::addr_of!(__stack_top)),
+                firmware_stack_bottom(),
+                firmware_stack_top(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesData,
         )?;
@@ -237,29 +238,29 @@ impl<'a> PageAllocator<'a> {
 
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__firmware_code_start)),
-                symbol_address(core::ptr::addr_of!(__firmware_code_end)),
+                firmware_code_start(),
+                firmware_code_end(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesCode,
         )?;
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__firmware_data_start)),
-                symbol_address(core::ptr::addr_of!(__firmware_data_end)),
+                firmware_data_start(),
+                firmware_data_end(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesData,
         )?;
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__heap_start)),
-                symbol_address(core::ptr::addr_of!(__heap_end)),
+                firmware_heap_start(),
+                firmware_heap_end(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesData,
         )?;
         allocator.add_firmware_region(
             linker_region(
-                symbol_address(core::ptr::addr_of!(__stack_bottom)),
-                symbol_address(core::ptr::addr_of!(__stack_top)),
+                firmware_stack_bottom(),
+                firmware_stack_top(),
             )?,
             EFI_MEMORY_TYPE::EfiBootServicesData,
         )?;
@@ -462,19 +463,34 @@ impl<'a> PageAllocator<'a> {
         Ok(())
     }
 
-    /// Finds the first conventional-memory range that can satisfy `Pages`.
+    /// Finds the highest conventional-memory range that can satisfy `Pages`.
     ///
     /// # Parameters
     ///
     /// - `Pages`: Number of pages requested.
     fn find_allocation_any_pages(&self, Pages: UINT64) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+        let byte_count = pages_to_bytes(Pages as UINTN)?;
+        let mut candidate = None;
+
         for descriptor in self.descriptors() {
-            if descriptor.Type == EFI_MEMORY_TYPE::EfiConventionalMemory as UINT32 && descriptor.NumberOfPages >= Pages {
-                return Ok(descriptor.PhysicalStart);
+            if descriptor.Type != EFI_MEMORY_TYPE::EfiConventionalMemory as UINT32 {
+                continue;
             }
+
+            let descriptor_end = descriptor_end(*descriptor)?;
+            if descriptor_end < descriptor.PhysicalStart.saturating_add(byte_count) {
+                continue;
+            }
+
+            let start = align_down(descriptor_end - byte_count, EFI_PAGE_SIZE);
+            if start < descriptor.PhysicalStart {
+                continue;
+            }
+
+            candidate = Some(candidate.map_or(start, |current| max(current, start)));
         }
 
-        Err(MemoryError::OutOfResources)
+        candidate.ok_or(MemoryError::OutOfResources)
     }
 
     /// Finds the highest conventional-memory range below `Memory` that fits `Pages` bytes.
@@ -832,13 +848,124 @@ fn linker_region(
     )
 }
 
-/// Converts a linker symbol address into an EFI physical address.
-///
-/// # Parameters
-///
-/// - `ptr`: Pointer produced from a linker-defined symbol.
-fn symbol_address(ptr: *const u8) -> EFI_PHYSICAL_ADDRESS {
-    ptr as usize as EFI_PHYSICAL_ADDRESS
+/// Returns the runtime address of the linker-defined firmware code start.
+fn firmware_code_start() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __firmware_code_start",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware code end.
+fn firmware_code_end() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __firmware_code_end",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware data start.
+fn firmware_data_start() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __firmware_data_start",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware data end.
+fn firmware_data_end() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __firmware_data_end",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware heap start.
+fn firmware_heap_start() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __heap_start",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware heap end.
+fn firmware_heap_end() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __heap_end",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware stack bottom.
+fn firmware_stack_bottom() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __stack_bottom",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
+}
+
+/// Returns the runtime address of the linker-defined firmware stack top.
+fn firmware_stack_top() -> EFI_PHYSICAL_ADDRESS {
+    let address: usize;
+
+    unsafe {
+        asm!(
+            "lla {address}, __stack_top",
+            address = lateout(reg) address,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    address as EFI_PHYSICAL_ADDRESS
 }
 
 /// Converts a page count from `UINTN` to `UINT64`.

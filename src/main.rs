@@ -40,7 +40,7 @@ use fat::FatVolume;
 use filesystem::{FileHandle, FileInfo, FileInfoView, FileSystem, LoadedFile};
 use gpt::GptPartitionTable;
 use linux::{boot as linux_boot, check_kernel_header, start as linux_start};
-use memory::{EFI_MEMORY_DESCRIPTOR, PageAllocator};
+use memory::{EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR, EFI_MEMORY_TYPE, PageAllocator};
 use partition::{PartitionEntry, PartitionTable};
 use virtio::{qemu_virt_block_devices, BlockDevice};
 use virtio::VirtioBlockDriver;
@@ -48,6 +48,12 @@ use virtio::VirtioBlockDriver;
 unsafe extern "C" {
     /// Linker-defined top of the firmware-owned runtime stack.
     static __stack_top: u8;
+    /// Linker-defined start of the firmware runtime image.
+    static __firmware_code_start: u8;
+    /// Assembly relocation entry point inside the firmware image.
+    static relocated_entry: u8;
+    /// Linker-defined end of the reserved firmware runtime image window.
+    static __heap_end: u8;
 }
 
 /// SBI extension ID for the debug console extension.
@@ -69,20 +75,25 @@ const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
     Some(profile) => profile,
     None => "unknown",
 };
+/// OpenSBI loads the primary firmware image at this physical address on QEMU virt.
+const PRIMARY_FIRMWARE_LOAD_ADDRESS: usize = 0x8020_0000;
+/// Linux is loaded at the conventional physical start address on QEMU virt.
+const KERNEL_LOAD_ADDRESS: usize = 0x8020_0000;
 
 global_asm!(
     r#"
     .section .text.entry
     .globl _start
 _start:
-    la t0, BOOT_HART_ID
-    sd a0, 0(t0)
-    la t0, DEVICE_TREE_PTR
-    sd a1, 0(t0)
-    la t0, ENTRY_STACK_PTR
-    sd sp, 0(t0)
+    mv a2, sp
     li sp, 0x80200000
     tail rust_entry
+
+    .globl relocated_entry
+relocated_entry:
+    mv a2, sp
+    lla sp, __stack_top
+    tail rust_relocated_entry
 "#
 );
 
@@ -128,7 +139,32 @@ pub fn entry_stack_ptr() -> usize {
 
 /// Returns the top address of the linker-defined firmware-owned stack.
 pub fn stack_top() -> usize {
-    core::ptr::addr_of!(__stack_top) as usize
+    PRIMARY_FIRMWARE_LOAD_ADDRESS
+}
+
+/// Returns the runtime base address of the current firmware image.
+fn firmware_runtime_base() -> usize {
+    let value: usize;
+
+    unsafe {
+        asm!(
+            "lla {value}, __firmware_code_start",
+            value = lateout(reg) value,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+
+    value
+}
+
+/// Returns the runtime size in bytes of the reserved firmware image window.
+fn firmware_runtime_size() -> usize {
+    core::ptr::addr_of!(__heap_end) as usize
+}
+
+/// Returns the linked offset of the relocated firmware entry inside the image.
+fn relocated_entry_offset() -> usize {
+    core::ptr::addr_of!(relocated_entry) as usize
 }
 
 /// Performs one SBI environment call with the provided register arguments.
@@ -334,6 +370,8 @@ fn list_esp_files<D: BlockDevice>(
     device: &mut D,
     partition_start_lba: u64,
     block_device_index: usize,
+    boot_hart: usize,
+    device_tree_ptr: *const u8,
 ) {
     let mut volume = match FatVolume::new(device, partition_start_lba) {
         Ok(volume) => volume,
@@ -355,7 +393,12 @@ fn list_esp_files<D: BlockDevice>(
         let _ = puts("fat: failed to walk esp files\n");
     }
 
-    try_linux_boot_from_esp(&mut volume, block_device_index);
+    try_linux_boot_from_esp(
+        &mut volume,
+        block_device_index,
+        boot_hart,
+        device_tree_ptr,
+    );
 }
 
 /// Tries the Linux boot method when `/vmlinux` and `/initrd.img` exist.
@@ -367,6 +410,8 @@ fn list_esp_files<D: BlockDevice>(
 fn try_linux_boot_from_esp<D: BlockDevice>(
     volume: &mut FatVolume<'_, D>,
     block_device_index: usize,
+    boot_hart: usize,
+    device_tree_ptr: *const u8,
 ) {
     let Some((kernel_path, kernel)) = describe_first_file(
         volume,
@@ -377,12 +422,16 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
     let Some(initrd) = describe_file(volume, "/initrd.img") else {
         return;
     };
-    let Some(command_line) = root_command_line(block_device_index) else {
+    let mut command_line_buffer = [0u8; 14];
+    let Some(command_line) = root_command_line(
+        block_device_index,
+        &mut command_line_buffer,
+    ) else {
         let _ = puts("linux: unsupported root device index\n");
         return;
     };
 
-    let device_tree = match Dtb::from_ptr(device_tree_ptr()) {
+    let device_tree = match Dtb::from_ptr(device_tree_ptr) {
         Ok(device_tree) => device_tree,
         Err(_) => {
             let _ = puts("linux: invalid device-tree pointer\n");
@@ -393,6 +442,7 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
     let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
     let mut allocator = match page_allocator_from_live_fdt(
+        device_tree_ptr,
         &mut regions,
         &mut reserved,
         &mut memory_map,
@@ -412,7 +462,12 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
         command_line,
     ) {
         Ok(mut request) => {
-            let kernel_loaded = match load_file(volume, kernel_path, &mut allocator) {
+            let kernel_loaded = match load_file_at(
+                volume,
+                kernel_path,
+                &mut allocator,
+                KERNEL_LOAD_ADDRESS as u64,
+            ) {
                 Some(file) => file,
                 None => {
                     let _ = puts("linux: failed to load ");
@@ -441,7 +496,7 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
                     return;
                 }
             };
-            match request.update_device_tree(&initrd_loaded) {
+            match request.update_device_tree(&initrd_loaded, command_line) {
                 Ok(()) => {}
                 Err(_) => {
                     let _ = puts("linux: failed to update cloned device-tree\n");
@@ -459,15 +514,15 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
             let _ = puts(" @ ");
             put_hex_usize(initrd_loaded.physical_start() as usize);
             let _ = puts(", cmdline='");
-            let _ = puts(request.command_line());
+            let _ = puts(command_line);
             let _ = puts("'\n");
             let _ = puts("linux: transferring control to kernel\n");
 
             unsafe {
                 linux_start(
                     &kernel_loaded,
-                    boot_hart_id(),
-                    device_tree_ptr(),
+                    boot_hart,
+                    request.device_tree().pointer(),
                 );
             }
         }
@@ -530,6 +585,24 @@ fn load_file<D: BlockDevice>(
     file.load(allocator).ok()
 }
 
+/// Loads one file from `volume` into EFI-style pages at a fixed address.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem containing the path.
+/// - `path`: Absolute path to load.
+/// - `allocator`: Page allocator used to reserve the destination pages.
+/// - `physical_start`: Page-aligned physical address to reserve.
+fn load_file_at<D: BlockDevice>(
+    volume: &mut FatVolume<'_, D>,
+    path: &str,
+    allocator: &mut PageAllocator<'_>,
+    physical_start: u64,
+) -> Option<LoadedFile> {
+    let mut file = volume.open(path).ok()?;
+    file.load_at(allocator, physical_start).ok()
+}
+
 /// Builds a page allocator from the live boot-time device tree.
 ///
 /// # Parameters
@@ -538,11 +611,12 @@ fn load_file<D: BlockDevice>(
 /// - `reserved_regions`: Scratch slice that receives reserved ranges.
 /// - `descriptors`: Descriptor buffer that receives the EFI-style memory map.
 fn page_allocator_from_live_fdt<'a>(
+    device_tree_ptr: *const u8,
     memory_regions: &mut [MemoryRegion],
     reserved_regions: &mut [MemoryRegion],
     descriptors: &'a mut [EFI_MEMORY_DESCRIPTOR],
 ) -> Option<PageAllocator<'a>> {
-    let fdt = unsafe { Fdt::from_ptr(device_tree_ptr()).ok()? };
+    let fdt = unsafe { Fdt::from_ptr(device_tree_ptr).ok()? };
     PageAllocator::from_fdt(
         &fdt,
         memory_regions,
@@ -552,25 +626,99 @@ fn page_allocator_from_live_fdt<'a>(
     .ok()
 }
 
+/// Allocates a high-memory destination, copies the current firmware image, and
+/// jumps into the relocated copy.
+fn try_relocate_firmware(
+    boot_hart: usize,
+    device_tree: *const u8,
+    entry_stack: usize,
+) -> Option<()> {
+    let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
+    let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
+    let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
+    let mut allocator = page_allocator_from_live_fdt(
+        device_tree,
+        &mut regions,
+        &mut reserved,
+        &mut memory_map,
+    )?;
+
+    let runtime_base = firmware_runtime_base();
+    let runtime_size = firmware_runtime_size();
+    let runtime_pages = runtime_size.div_ceil(memory::EFI_PAGE_SIZE as usize);
+    let mut relocated_base = u64::MAX;
+    allocator
+        .AllocatePages(
+            EFI_ALLOCATE_TYPE::AllocateMaxAddress,
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+            runtime_pages,
+            &mut relocated_base,
+        )
+        .ok()?;
+
+    unsafe {
+        ptr::copy_nonoverlapping(
+            runtime_base as *const u8,
+            relocated_base as *mut u8,
+            runtime_size,
+        );
+    }
+
+    let _ = puts("rustfimware: relocating image to ");
+    put_hex_usize(relocated_base as usize);
+    let _ = puts("\n");
+
+    unsafe {
+        enter_relocated_copy(
+            relocated_base as usize,
+            boot_hart,
+            device_tree,
+            entry_stack,
+        )
+    }
+}
+
+/// Transfers control into the relocated firmware image.
+unsafe fn enter_relocated_copy(
+    relocated_base: usize,
+    boot_hart: usize,
+    device_tree: *const u8,
+    entry_stack: usize,
+) -> ! {
+    let relocated_entry_address = relocated_base
+        .checked_add(relocated_entry_offset())
+        .unwrap();
+
+    unsafe {
+        asm!(
+            "fence.i",
+            "jr {entry}",
+            entry = in(reg) relocated_entry_address,
+            in("a0") boot_hart,
+            in("a1") device_tree as usize,
+            in("a2") entry_stack,
+            options(noreturn)
+        );
+    }
+}
+
 /// Returns the Linux root-device command line for one virtio block device.
 ///
 /// # Parameters
 ///
 /// - `block_device_index`: Zero-based virtio block-device index.
-fn root_command_line(block_device_index: usize) -> Option<&'static str> {
-    const ROOT_COMMAND_LINES: [&str; 26] = [
-        "root=/dev/vda", "root=/dev/vdb", "root=/dev/vdc",
-        "root=/dev/vdd", "root=/dev/vde", "root=/dev/vdf",
-        "root=/dev/vdg", "root=/dev/vdh", "root=/dev/vdi",
-        "root=/dev/vdj", "root=/dev/vdk", "root=/dev/vdl",
-        "root=/dev/vdm", "root=/dev/vdn", "root=/dev/vdo",
-        "root=/dev/vdp", "root=/dev/vdq", "root=/dev/vdr",
-        "root=/dev/vds", "root=/dev/vdt", "root=/dev/vdu",
-        "root=/dev/vdv", "root=/dev/vdw", "root=/dev/vdx",
-        "root=/dev/vdy", "root=/dev/vdz",
-    ];
+fn root_command_line<'a>(
+    block_device_index: usize,
+    buffer: &'a mut [u8; 14],
+) -> Option<&'a str> {
+    if block_device_index >= 26 {
+        return None;
+    }
 
-    ROOT_COMMAND_LINES.get(block_device_index).copied()
+    buffer.copy_from_slice(b"root=/dev/vda1");
+    buffer[12] = b'a' + block_device_index as u8;
+
+    Some(unsafe { str::from_utf8_unchecked(&buffer[..]) })
 }
 
 /// Empty descriptor value used for temporary EFI memory-map arrays.
@@ -586,8 +734,9 @@ const EMPTY_MEMORY_DESCRIPTOR: EFI_MEMORY_DESCRIPTOR = EFI_MEMORY_DESCRIPTOR {
 ///
 /// # Parameters
 ///
-/// This function does not accept parameters.
-fn probe_virtio() {
+/// - `boot_hart`: Original hart identifier received in register `a0`.
+/// - `device_tree_ptr`: Original device-tree pointer received in register `a1`.
+fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
     let mut found_any = false;
     let mut block_device_index = 0usize;
 
@@ -657,6 +806,8 @@ fn probe_virtio() {
                     &mut driver,
                     partition_start_lba,
                     current_block_device_index,
+                    boot_hart,
+                    device_tree_ptr,
                 );
 
                 partitions = match GptPartitionTable::new(&mut driver) {
@@ -680,14 +831,55 @@ fn probe_virtio() {
 ///
 /// # Parameters
 ///
-/// This function does not accept parameters.
-extern "C" fn rust_entry() -> ! {
-    let _boot_hart = boot_hart_id();
-    let _device_tree = device_tree_ptr();
+/// - `boot_hart`: Original hart identifier received in register `a0`.
+/// - `device_tree`: Original device-tree pointer received in register `a1`.
+/// - `entry_stack`: Original stack pointer value observed before switching stacks.
+extern "C" fn rust_entry(
+    boot_hart: usize,
+    device_tree: *const u8,
+    entry_stack: usize,
+) -> ! {
+    run_firmware(boot_hart, device_tree, entry_stack)
+}
+
+#[unsafe(no_mangle)]
+/// Firmware entry point reached after jumping into a relocated firmware copy.
+///
+/// # Parameters
+///
+/// - `boot_hart`: Original hart identifier received in register `a0`.
+/// - `device_tree`: Original device-tree pointer received in register `a1`.
+/// - `entry_stack`: Original stack pointer value observed before switching stacks.
+extern "C" fn rust_relocated_entry(
+    boot_hart: usize,
+    device_tree: *const u8,
+    entry_stack: usize,
+) -> ! {
+    run_firmware(boot_hart, device_tree, entry_stack)
+}
+
+/// Shared firmware main routine used by the primary and relocated entry paths.
+///
+/// # Parameters
+///
+/// - `boot_hart`: Original hart identifier received in register `a0`.
+/// - `device_tree`: Original device-tree pointer received in register `a1`.
+/// - `entry_stack`: Original stack pointer value observed before switching stacks.
+fn run_firmware(
+    boot_hart: usize,
+    device_tree: *const u8,
+    entry_stack: usize,
+) -> ! {
+    if boot_hart == 0 && firmware_runtime_base() == PRIMARY_FIRMWARE_LOAD_ADDRESS {
+        if let Some(()) = try_relocate_firmware(boot_hart, device_tree, entry_stack) {
+            unreachable!();
+        }
+        let _ = puts("rustfimware: relocation unavailable, continuing in-place\n");
+    }
 
     let _ = greet();
-    print_diagnostics();
-    probe_virtio();
+    print_diagnostics(boot_hart, device_tree, entry_stack);
+    probe_virtio(boot_hart, device_tree);
     let _ = puts("rustfimware: poweroff via sbi srst\n");
     poweroff()
 }

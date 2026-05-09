@@ -13,6 +13,9 @@ QEMU_FLAGS := -nographic
 QEMU_MEMORY := 1G
 QEMU_VIRTIO_MMIO_BUS := virtio-mmio-bus.0
 QEMU_VIRTIO_MMIO_FLAGS := -global virtio-mmio.force-legacy=false
+QEMU_NETDEV_ID := net0
+QEMU_NETDEV_FLAGS := -netdev user,id=$(QEMU_NETDEV_ID)
+QEMU_VIRTIO_NET_FLAGS := -device virtio-net-device,netdev=$(QEMU_NETDEV_ID)
 QEMU_GDB_PORT := 1234
 
 .PHONY: all build docs check debug clean
@@ -44,6 +47,8 @@ check: $(BIN) test.img
 		-m $(QEMU_MEMORY) \
 		$(QEMU_FLAGS) \
 		$(QEMU_VIRTIO_MMIO_FLAGS) \
+		$(QEMU_NETDEV_FLAGS) \
+		$(QEMU_VIRTIO_NET_FLAGS) \
 		-kernel $(BIN) \
 		-drive file=test.img,format=raw,id=drv0,if=none \
 		-device virtio-blk-device,drive=drv0,bus=$(QEMU_VIRTIO_MMIO_BUS),bootindex=1
@@ -54,6 +59,8 @@ debug: $(BIN) test.img
 		-m $(QEMU_MEMORY) \
 		$(QEMU_FLAGS) \
 		$(QEMU_VIRTIO_MMIO_FLAGS) \
+		$(QEMU_NETDEV_FLAGS) \
+		$(QEMU_VIRTIO_NET_FLAGS) \
 		-S \
 		-gdb tcp::$(QEMU_GDB_PORT) \
 		-kernel $(BIN) \

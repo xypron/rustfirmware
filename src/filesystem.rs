@@ -173,6 +173,18 @@ pub trait FileHandle: FileInfoView {
         &mut self,
         allocator: &mut PageAllocator<'_>,
     ) -> Result<LoadedFile, Self::Error>;
+
+    /// Loads the file into page-aligned EFI-style memory at one fixed address.
+    ///
+    /// # Parameters
+    ///
+    /// - `allocator`: Page allocator used to reserve the destination pages.
+    /// - `physical_start`: Page-aligned physical start address to allocate.
+    fn load_at(
+        &mut self,
+        allocator: &mut PageAllocator<'_>,
+        physical_start: EFI_PHYSICAL_ADDRESS,
+    ) -> Result<LoadedFile, Self::Error>;
 }
 
 /// Filesystem that can open path-based file handles.

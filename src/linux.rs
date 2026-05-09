@@ -114,16 +114,17 @@ impl<'a> LinuxBootRequest<'a> {
     /// # Parameters
     ///
     /// - `initrd`: Loaded initrd image whose physical range should be exposed.
+    /// - `command_line`: Linux kernel command line written into `/chosen/bootargs`.
     pub fn update_device_tree(
         &mut self,
         initrd: &LoadedFile,
+        command_line: &str,
     ) -> Result<(), LinuxBootError> {
         let initrd_start = initrd.physical_start();
         let initrd_size = u64::try_from(initrd.size_bytes())
             .map_err(|_| LinuxBootError::InitrdRangeOverflow)?;
         let initrd_end = initrd_start
             .checked_add(initrd_size)
-            .and_then(|end| end.checked_sub(1))
             .ok_or(LinuxBootError::InitrdRangeOverflow)?;
 
         self.device_tree
@@ -136,7 +137,7 @@ impl<'a> LinuxBootRequest<'a> {
             .set_property_u64("/chosen", "linux,initrd-end", initrd_end)
             .map_err(LinuxBootError::DeviceTreeUpdate)?;
         self.device_tree
-            .set_property_string("/chosen", "bootargs", self.command_line)
+            .set_property_string("/chosen", "bootargs", command_line)
             .map_err(LinuxBootError::DeviceTreeUpdate)?;
 
         Ok(())

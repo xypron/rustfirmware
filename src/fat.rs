@@ -14,6 +14,7 @@ use crate::filesystem::{
 };
 use crate::memory::{
     EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE, EFI_PAGE_SIZE,
+    EFI_PHYSICAL_ADDRESS,
     MemoryError, PageAllocator,
 };
 use crate::virtio::{BlockDevice, VirtioError, VIRTIO_SECTOR_SIZE};
@@ -189,6 +190,17 @@ impl<'volume, 'device, D: BlockDevice> FileHandle
 {
     type Error = FatError;
 
+    fn load(
+        &mut self,
+        allocator: &mut PageAllocator<'_>,
+    ) -> Result<LoadedFile, FatError> {
+        self.load_into_pages(
+            allocator,
+            EFI_ALLOCATE_TYPE::AllocateAnyPages,
+            0,
+        )
+    }
+
     /// Loads the file into page-aligned EFI-style memory.
     ///
     /// The allocation is performed as `EfiLoaderData` and always begins at the
@@ -197,18 +209,34 @@ impl<'volume, 'device, D: BlockDevice> FileHandle
     /// # Parameters
     ///
     /// - `allocator`: Page allocator used to reserve the destination pages.
-    fn load(
+    fn load_at(
         &mut self,
         allocator: &mut PageAllocator<'_>,
+        physical_start: EFI_PHYSICAL_ADDRESS,
+    ) -> Result<LoadedFile, FatError> {
+        self.load_into_pages(
+            allocator,
+            EFI_ALLOCATE_TYPE::AllocateAddress,
+            physical_start,
+        )
+    }
+}
+
+impl<'volume, 'device, D: BlockDevice> FatFile<'volume, 'device, D> {
+    fn load_into_pages(
+        &mut self,
+        allocator: &mut PageAllocator<'_>,
+        allocation_type: EFI_ALLOCATE_TYPE,
+        requested_start: EFI_PHYSICAL_ADDRESS,
     ) -> Result<LoadedFile, FatError> {
         if self.entry.is_directory() {
             return Err(FatError::IsDirectory);
         }
 
         let page_count = max(1, file_size_to_page_count(self.entry.file_size)?);
-        let mut physical_start = 0;
+        let mut physical_start = requested_start;
         allocator.AllocatePages(
-            EFI_ALLOCATE_TYPE::AllocateAnyPages,
+            allocation_type,
             EFI_MEMORY_TYPE::EfiLoaderData,
             page_count,
             &mut physical_start,

@@ -3,10 +3,7 @@
 //! This module prints raw device-tree information first and then prints the
 //! EFI-style page map built from that information by the memory subsystem.
 
-use crate::boot_hart_id;
 use crate::devicetree::{Fdt, MemoryRegion};
-use crate::device_tree_ptr;
-use crate::entry_stack_ptr;
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 use crate::put_decimal_u64;
 use crate::put_hex_usize;
@@ -16,21 +13,27 @@ use crate::puts;
 ///
 /// # Parameters
 ///
-/// This function does not accept parameters.
-pub fn print_diagnostics() {
+/// - `boot_hart`: Original hart identifier received in register `a0`.
+/// - `device_tree`: Original device-tree pointer received in register `a1`.
+/// - `entry_stack`: Original stack pointer value observed before switching stacks.
+pub fn print_diagnostics(
+    boot_hart: usize,
+    device_tree: *const u8,
+    entry_stack: usize,
+) {
     let _ = puts("entry: boot_hart=");
-    put_decimal_u64(boot_hart_id() as u64);
+    put_decimal_u64(boot_hart as u64);
     let _ = puts(", device_tree=");
-    put_hex_usize(device_tree_ptr() as usize);
+    put_hex_usize(device_tree as usize);
     let _ = puts(", sp=");
-    put_hex_usize(entry_stack_ptr());
+    put_hex_usize(entry_stack);
     let _ = puts("\n");
 
     let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
 
-    let fdt = match unsafe { Fdt::from_ptr(device_tree_ptr()) } {
+    let fdt = match unsafe { Fdt::from_ptr(device_tree) } {
         Ok(fdt) => fdt,
         Err(_) => {
             let _ = puts("diagnostics: memory-map unavailable\n");
