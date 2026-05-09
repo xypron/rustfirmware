@@ -15,16 +15,16 @@ QEMU_VIRTIO_MMIO_BUS := virtio-mmio-bus.0
 QEMU_VIRTIO_MMIO_FLAGS := -global virtio-mmio.force-legacy=false
 QEMU_GDB_PORT := 1234
 
-.PHONY: all build elf bin docs check debug clean
+.PHONY: all build docs check debug clean
 
-all: bin
+all: $(BIN)
 
-build: bin
+build: $(BIN)
 
-elf:
-	PROFILE_NAME=$(PROFILE) cargo build --target $(TARGET) --profile $(PROFILE)
+$(ELF):
+	PROFILE_NAME=$(PROFILE) cargo build --target $(TARGET) --profile $(PROFILE) --bin $(PACKAGE)
 
-bin: elf
+$(BIN): $(ELF)
 	mkdir -p $(dir $(BIN))
 	@objcopy="$(OBJCOPY)"; \
 	test -n "$$objcopy" || (echo "error: need rust-objcopy or llvm-objcopy in PATH" >&2; exit 1); \
@@ -35,11 +35,10 @@ docs:
 	PROFILE_NAME=$(PROFILE) cargo doc --no-deps
 
 test.img:
-	rm -f test.img test.img.xz
-	wget $(UBUNTU_IMG_URL) -O test.img.xz
-	xz -d test.img.xz
+	if [ ! -f test.img.xz ]; then wget $(UBUNTU_IMG_URL) -O test.img.xz; fi
+	xz -dk test.img.xz
 
-check: bin test.img
+check: $(BIN) test.img
 	$(QEMU) \
 		-M $(QEMU_MACHINE) \
 		-m $(QEMU_MEMORY) \
@@ -49,7 +48,7 @@ check: bin test.img
 		-drive file=test.img,format=raw,id=drv0,if=none \
 		-device virtio-blk-device,drive=drv0,bus=$(QEMU_VIRTIO_MMIO_BUS),bootindex=1
 
-debug: bin test.img
+debug: $(BIN) test.img
 	$(QEMU) \
 		-M $(QEMU_MACHINE) \
 		-m $(QEMU_MEMORY) \
@@ -63,4 +62,4 @@ debug: bin test.img
 
 clean:
 	cargo clean
-	rm -f test.img test.img.tmp
+	rm -f tests/data/in*.dtb tests/data/out*.dtb

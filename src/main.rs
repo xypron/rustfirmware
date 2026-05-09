@@ -382,23 +382,36 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
         return;
     };
 
-    let device_tree = Dtb::new();
-    match linux_boot(&kernel, Some(&initrd), &device_tree, command_line) {
+    let device_tree = match Dtb::from_ptr(device_tree_ptr()) {
+        Ok(device_tree) => device_tree,
+        Err(_) => {
+            let _ = puts("linux: invalid device-tree pointer\n");
+            return;
+        }
+    };
+    let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
+    let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
+    let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
+    let mut allocator = match page_allocator_from_live_fdt(
+        &mut regions,
+        &mut reserved,
+        &mut memory_map,
+    ) {
+        Some(allocator) => allocator,
+        None => {
+            let _ = puts("linux: page allocator unavailable\n");
+            return;
+        }
+    };
+
+    match linux_boot(
+        &kernel,
+        Some(&initrd),
+        &device_tree,
+        &mut allocator,
+        command_line,
+    ) {
         Ok(request) => {
-            let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
-            let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
-            let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
-            let mut allocator = match page_allocator_from_live_fdt(
-                &mut regions,
-                &mut reserved,
-                &mut memory_map,
-            ) {
-                Some(allocator) => allocator,
-                None => {
-                    let _ = puts("linux: page allocator unavailable\n");
-                    return;
-                }
-            };
             let kernel_loaded = match load_file(volume, kernel_path, &mut allocator) {
                 Some(file) => file,
                 None => {

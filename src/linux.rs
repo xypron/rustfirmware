@@ -5,13 +5,16 @@
 //! tree mutation, and control transfer will be added later when those layers
 //! are available.
 
-use crate::dtb::Dtb;
+use crate::dtb::{Dtb, DtbError};
 use crate::filesystem::{FileInfoView, FileType, LoadedFile};
+use crate::memory::PageAllocator;
 use crate::puts;
 use core::mem::offset_of;
 
 /// RISC-V Linux boot image header size in bytes.
 const RISCV_LINUX_HEADER_SIZE: usize = 64;
+/// Extra space reserved in the cloned Linux device tree.
+const LINUX_DTB_EXTRA_SIZE: usize = 8 * 1024;
 /// Deprecated RISC-V Linux boot header magic value, little-endian.
 const RISCV_LINUX_MAGIC: u64 = 0x5643_5349_52;
 /// Required RISC-V Linux boot header second magic value, little-endian.
@@ -57,7 +60,7 @@ const _: [(); 0x3c] = [(); offset_of!(LinuxBootImageHeader, res3)];
 /// Linux boot request built from already-selected boot artifacts.
 pub struct LinuxBootRequest<'a> {
     /// Device tree passed to the Linux boot flow.
-    device_tree: &'a Dtb,
+    device_tree: Dtb,
     /// Kernel command line passed to Linux.
     command_line: &'a str,
     /// Size in bytes of the selected kernel image.
@@ -72,8 +75,8 @@ impl<'a> LinuxBootRequest<'a> {
     /// # Parameters
     ///
     /// This function does not accept parameters.
-    pub fn device_tree(&self) -> &'a Dtb {
-        self.device_tree
+    pub fn device_tree(&self) -> &Dtb {
+        &self.device_tree
     }
 
     /// Returns the Linux command line.
@@ -116,6 +119,8 @@ pub enum LinuxBootError {
     InvalidKernelMagic,
     /// The loaded kernel image header had an unexpected `magic2` value.
     InvalidKernelMagic2,
+    /// Cloning the device tree for Linux boot failed.
+    DeviceTreeClone(DtbError),
 }
 
 /// Builds one Linux boot request from already-selected boot artifacts.
@@ -129,11 +134,13 @@ pub enum LinuxBootError {
 /// - `kernel`: Opened file handle for the Linux kernel image.
 /// - `initrd`: Optional opened file handle for the initrd image.
 /// - `device_tree`: Device tree object passed to the Linux boot flow.
+/// - `allocator`: Page allocator used to clone the device tree for Linux.
 /// - `command_line`: Linux kernel command line.
 pub fn boot<'a, Kernel, Initrd>(
     kernel: &Kernel,
     initrd: Option<&Initrd>,
-    device_tree: &'a Dtb,
+    device_tree: &Dtb,
+    allocator: &mut PageAllocator<'_>,
     command_line: &'a str,
 ) -> Result<LinuxBootRequest<'a>, LinuxBootError>
 where
@@ -155,8 +162,23 @@ where
         None => None,
     };
 
+    let cloned_device_tree = device_tree
+        .clone(
+            device_tree
+                .size()
+                .checked_add(LINUX_DTB_EXTRA_SIZE)
+                .ok_or(LinuxBootError::DeviceTreeClone(DtbError::SizeOverflow))?,
+            allocator,
+        )
+        .map_err(LinuxBootError::DeviceTreeClone)?;
+
+    // Linux boot still needs to fill these DTB properties in the clone:
+    // - linux,initrd-start: 64-bit value
+    // - linux,initrd-end: 64-bit value
+    // - bootargs: zero-terminated UTF-8 string
+
     Ok(LinuxBootRequest {
-        device_tree,
+        device_tree: cloned_device_tree,
         command_line,
         kernel_size_bytes: kernel.size_bytes(),
         initrd_size_bytes,
