@@ -39,6 +39,10 @@ $(BIN): $(ELF)
 
 docs:
 	PROFILE_NAME=$(PROFILE) cargo doc --no-deps --bin $(PACKAGE)
+	rm -rf target/doc
+	mkdir -p target/doc
+	cp -a target/$(TARGET)/doc/. target/doc/
+	@echo "API docs: target/doc/$(PACKAGE)/index.html"
 
 test.img:
 	if [ ! -f test.img.xz ]; then wget $(UBUNTU_IMG_URL) -O test.img.xz; fi
