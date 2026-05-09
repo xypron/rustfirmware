@@ -1,9 +1,9 @@
 //! Linux boot-method request construction.
 //!
 //! This module validates the boot artifacts required for one Linux boot and
-//! packages them into a Linux-specific request. Actual image loading, device
-//! tree mutation, and control transfer will be added later when those layers
-//! are available.
+//! packages them into a Linux-specific request. The firmware loads the kernel
+//! and optional initrd, clones and updates the device tree, validates the
+//! RISC-V Linux boot header, and can then transfer control into the kernel.
 
 use crate::dtb::{Dtb, DtbError};
 use crate::filesystem::{FileInfoView, FileType, LoadedFile};
@@ -113,29 +113,31 @@ impl<'a> LinuxBootRequest<'a> {
     ///
     /// # Parameters
     ///
-    /// - `initrd`: Loaded initrd image whose physical range should be exposed.
+    /// - `initrd`: Optional loaded initrd image whose physical range should be exposed.
     /// - `command_line`: Linux kernel command line written into `/chosen/bootargs`.
     pub fn update_device_tree(
         &mut self,
-        initrd: &LoadedFile,
+        initrd: Option<&LoadedFile>,
         command_line: &str,
     ) -> Result<(), LinuxBootError> {
-        let initrd_start = initrd.physical_start();
-        let initrd_size = u64::try_from(initrd.size_bytes())
-            .map_err(|_| LinuxBootError::InitrdRangeOverflow)?;
-        let initrd_end = initrd_start
-            .checked_add(initrd_size)
-            .ok_or(LinuxBootError::InitrdRangeOverflow)?;
-
         self.device_tree
             .create_node("/chosen")
             .map_err(LinuxBootError::DeviceTreeUpdate)?;
-        self.device_tree
-            .set_property_u64("/chosen", "linux,initrd-start", initrd_start)
-            .map_err(LinuxBootError::DeviceTreeUpdate)?;
-        self.device_tree
-            .set_property_u64("/chosen", "linux,initrd-end", initrd_end)
-            .map_err(LinuxBootError::DeviceTreeUpdate)?;
+        if let Some(initrd) = initrd {
+            let initrd_start = initrd.physical_start();
+            let initrd_size = u64::try_from(initrd.size_bytes())
+                .map_err(|_| LinuxBootError::InitrdRangeOverflow)?;
+            let initrd_end = initrd_start
+                .checked_add(initrd_size)
+                .ok_or(LinuxBootError::InitrdRangeOverflow)?;
+
+            self.device_tree
+                .set_property_u64("/chosen", "linux,initrd-start", initrd_start)
+                .map_err(LinuxBootError::DeviceTreeUpdate)?;
+            self.device_tree
+                .set_property_u64("/chosen", "linux,initrd-end", initrd_end)
+                .map_err(LinuxBootError::DeviceTreeUpdate)?;
+        }
         self.device_tree
             .set_property_string("/chosen", "bootargs", command_line)
             .map_err(LinuxBootError::DeviceTreeUpdate)?;
