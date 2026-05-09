@@ -195,7 +195,7 @@ fn validate_entry_array_crc<D: BlockDevice>(
     let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
     let mut current_lba = start_lba;
     let mut remaining = usize::try_from(byte_len).ok()?;
-    let mut crc = 0u32;
+    let mut crc = 0xffff_ffff;
 
     while remaining != 0 {
         device.read_blocks(current_lba, &mut sector).ok()?;
@@ -500,13 +500,11 @@ fn copy_16(bytes: &[u8], offset: usize) -> Option<[u8; 16]> {
 
 /// Computes one GPT-style IEEE CRC32 over `bytes`.
 fn crc32(bytes: &[u8]) -> u32 {
-    crc32_finalize(crc32_update(0, bytes))
+    crc32_finalize(crc32_update(0xffff_ffff, bytes))
 }
 
 /// Updates an in-progress IEEE CRC32 with `bytes`.
 fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
-    crc = !crc;
-
     let mut index = 0usize;
     while index < bytes.len() {
         crc ^= u32::from(bytes[index]);
@@ -524,10 +522,10 @@ fn crc32_update(mut crc: u32, bytes: &[u8]) -> u32 {
         index += 1;
     }
 
-    !crc
+    crc
 }
 
 /// Finalizes one in-progress CRC32 state.
 fn crc32_finalize(crc: u32) -> u32 {
-    crc
+    !crc
 }
