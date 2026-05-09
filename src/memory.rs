@@ -159,12 +159,53 @@ impl<'a> PageAllocator<'a> {
     ) -> Result<Self, MemoryError> {
         let memory_region_count = fdt.memory_regions(memory_regions);
         let reserved_region_count = fdt.reserved_regions(reserved_regions);
-
-        Self::from_regions(
-            &memory_regions[..memory_region_count],
-            &reserved_regions[..reserved_region_count],
+        let mut allocator = Self {
             descriptors,
-        )
+            descriptor_count: 0,
+        };
+
+        for region in &memory_regions[..memory_region_count] {
+            allocator.add_memory_region(*region)?;
+        }
+
+        allocator.coalesce();
+        fdt.reserve_in(&mut allocator)?;
+
+        for region in &reserved_regions[..reserved_region_count] {
+            allocator.add_reserved_region(*region)?;
+        }
+
+        allocator.add_firmware_region(
+            linker_region(
+                symbol_address(core::ptr::addr_of!(__firmware_code_start)),
+                symbol_address(core::ptr::addr_of!(__firmware_code_end)),
+            )?,
+            EFI_MEMORY_TYPE::EfiBootServicesCode,
+        )?;
+        allocator.add_firmware_region(
+            linker_region(
+                symbol_address(core::ptr::addr_of!(__firmware_data_start)),
+                symbol_address(core::ptr::addr_of!(__firmware_data_end)),
+            )?,
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+        )?;
+        allocator.add_firmware_region(
+            linker_region(
+                symbol_address(core::ptr::addr_of!(__heap_start)),
+                symbol_address(core::ptr::addr_of!(__heap_end)),
+            )?,
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+        )?;
+        allocator.add_firmware_region(
+            linker_region(
+                symbol_address(core::ptr::addr_of!(__stack_bottom)),
+                symbol_address(core::ptr::addr_of!(__stack_top)),
+            )?,
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+        )?;
+
+        allocator.coalesce();
+        Ok(allocator)
     }
 
     /// Builds a page allocator from explicit RAM and reserved region lists.
@@ -252,6 +293,17 @@ impl<'a> PageAllocator<'a> {
     /// This function does not accept parameters.
     pub fn descriptors(&self) -> &[EFI_MEMORY_DESCRIPTOR] {
         &self.descriptors[..self.descriptor_count]
+    }
+
+    /// Reserves one region in the current EFI-style memory map.
+    ///
+    /// # Parameters
+    ///
+    /// - `region`: Region to carve from conventional memory.
+    pub fn reserve_region(&mut self, region: MemoryRegion) -> Result<(), MemoryError> {
+        self.add_reserved_region(region)?;
+        self.coalesce();
+        Ok(())
     }
 
     /// Allocates pages using EFI `AllocatePages` parameter names and types.

@@ -11,7 +11,6 @@ use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 use crate::put_decimal_u64;
 use crate::put_hex_usize;
 use crate::puts;
-use crate::stack_top;
 
 /// Prints firmware diagnostics using the live device tree and memory subsystem.
 ///
@@ -19,12 +18,12 @@ use crate::stack_top;
 ///
 /// This function does not accept parameters.
 pub fn print_diagnostics() {
-    let _ = puts("diagnostics: boot_hart=");
+    let _ = puts("entry: boot_hart=");
     put_decimal_u64(boot_hart_id() as u64);
-    let _ = puts(", entry_sp=");
+    let _ = puts(", device_tree=");
+    put_hex_usize(device_tree_ptr() as usize);
+    let _ = puts(", sp=");
     put_hex_usize(entry_stack_ptr());
-    let _ = puts(", stack_top=");
-    put_hex_usize(stack_top());
     let _ = puts("\n");
 
     let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];

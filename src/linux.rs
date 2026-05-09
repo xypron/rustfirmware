@@ -8,7 +8,10 @@
 use crate::dtb::{Dtb, DtbError};
 use crate::filesystem::{FileInfoView, FileType, LoadedFile};
 use crate::memory::PageAllocator;
+use crate::put_decimal_u64;
+use crate::put_hex_usize;
 use crate::puts;
+use core::arch::asm;
 use core::mem::offset_of;
 
 /// RISC-V Linux boot image header size in bytes.
@@ -105,6 +108,39 @@ impl<'a> LinuxBootRequest<'a> {
     pub fn initrd_size_bytes(&self) -> Option<usize> {
         self.initrd_size_bytes
     }
+
+    /// Fills Linux-specific `/chosen` properties in the cloned device tree.
+    ///
+    /// # Parameters
+    ///
+    /// - `initrd`: Loaded initrd image whose physical range should be exposed.
+    pub fn update_device_tree(
+        &mut self,
+        initrd: &LoadedFile,
+    ) -> Result<(), LinuxBootError> {
+        let initrd_start = initrd.physical_start();
+        let initrd_size = u64::try_from(initrd.size_bytes())
+            .map_err(|_| LinuxBootError::InitrdRangeOverflow)?;
+        let initrd_end = initrd_start
+            .checked_add(initrd_size)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or(LinuxBootError::InitrdRangeOverflow)?;
+
+        self.device_tree
+            .create_node("/chosen")
+            .map_err(LinuxBootError::DeviceTreeUpdate)?;
+        self.device_tree
+            .set_property_u64("/chosen", "linux,initrd-start", initrd_start)
+            .map_err(LinuxBootError::DeviceTreeUpdate)?;
+        self.device_tree
+            .set_property_u64("/chosen", "linux,initrd-end", initrd_end)
+            .map_err(LinuxBootError::DeviceTreeUpdate)?;
+        self.device_tree
+            .set_property_string("/chosen", "bootargs", self.command_line)
+            .map_err(LinuxBootError::DeviceTreeUpdate)?;
+
+        Ok(())
+    }
 }
 
 /// Errors returned while constructing one Linux boot request.
@@ -119,8 +155,12 @@ pub enum LinuxBootError {
     InvalidKernelMagic,
     /// The loaded kernel image header had an unexpected `magic2` value.
     InvalidKernelMagic2,
+    /// The loaded initrd range overflowed the supported 64-bit address space.
+    InitrdRangeOverflow,
     /// Cloning the device tree for Linux boot failed.
     DeviceTreeClone(DtbError),
+    /// Updating the cloned device tree for Linux boot failed.
+    DeviceTreeUpdate(DtbError),
 }
 
 /// Builds one Linux boot request from already-selected boot artifacts.
@@ -172,11 +212,6 @@ where
         )
         .map_err(LinuxBootError::DeviceTreeClone)?;
 
-    // Linux boot still needs to fill these DTB properties in the clone:
-    // - linux,initrd-start: 64-bit value
-    // - linux,initrd-end: 64-bit value
-    // - bootargs: zero-terminated UTF-8 string
-
     Ok(LinuxBootRequest {
         device_tree: cloned_device_tree,
         command_line,
@@ -211,6 +246,43 @@ pub fn check_kernel_header(
     }
 
     Ok(())
+}
+
+/// Starts one validated Linux kernel image.
+///
+/// The kernel entry receives the standard RISC-V Linux boot arguments:
+/// `a0 = boot_hart` and `a1 = updated_device_tree`.
+///
+/// # Parameters
+///
+/// - `kernel_image`: Loaded kernel image whose base address is jumped to.
+/// - `boot_hart`: Hart identifier passed in register `a0`.
+/// - `updated_device_tree`: Pointer to the updated DTB blob passed in `a1`.
+pub unsafe fn start(
+    kernel_image: &LoadedFile,
+    boot_hart: usize,
+    updated_device_tree: *const u8,
+) -> ! {
+    let kernel_entry = kernel_image.physical_start() as usize;
+
+    let _ = puts("linux: start entry=");
+    put_hex_usize(kernel_entry);
+    let _ = puts(", boot_hart=");
+    put_decimal_u64(boot_hart as u64);
+    let _ = puts(", device_tree=");
+    put_hex_usize(updated_device_tree as usize);
+    let _ = puts("\n");
+
+    unsafe {
+        asm!(
+            "fence.i",
+            "jalr ra, 0({kernel_entry})",
+            kernel_entry = in(reg) kernel_entry,
+            in("a0") boot_hart,
+            in("a1") updated_device_tree as usize,
+            options(noreturn)
+        );
+    }
 }
 
 /// Parses the fixed-size Linux boot image header from `bytes`.

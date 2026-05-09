@@ -39,7 +39,7 @@ use dtb::Dtb;
 use fat::FatVolume;
 use filesystem::{FileHandle, FileInfo, FileInfoView, FileSystem, LoadedFile};
 use gpt::GptPartitionTable;
-use linux::{boot as linux_boot, check_kernel_header};
+use linux::{boot as linux_boot, check_kernel_header, start as linux_start};
 use memory::{EFI_MEMORY_DESCRIPTOR, PageAllocator};
 use partition::{PartitionEntry, PartitionTable};
 use virtio::{qemu_virt_block_devices, BlockDevice};
@@ -411,7 +411,7 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
         &mut allocator,
         command_line,
     ) {
-        Ok(request) => {
+        Ok(mut request) => {
             let kernel_loaded = match load_file(volume, kernel_path, &mut allocator) {
                 Some(file) => file,
                 None => {
@@ -441,6 +441,13 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
                     return;
                 }
             };
+            match request.update_device_tree(&initrd_loaded) {
+                Ok(()) => {}
+                Err(_) => {
+                    let _ = puts("linux: failed to update cloned device-tree\n");
+                    return;
+                }
+            }
             let _ = puts("linux: boot request invoked ");
             let _ = puts(kernel_path);
             let _ = puts("=");
@@ -454,6 +461,15 @@ fn try_linux_boot_from_esp<D: BlockDevice>(
             let _ = puts(", cmdline='");
             let _ = puts(request.command_line());
             let _ = puts("'\n");
+            let _ = puts("linux: transferring control to kernel\n");
+
+            unsafe {
+                linux_start(
+                    &kernel_loaded,
+                    boot_hart_id(),
+                    device_tree_ptr(),
+                );
+            }
         }
         Err(_) => {
             let _ = puts("linux: boot request rejected\n");

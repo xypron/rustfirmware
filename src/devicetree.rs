@@ -8,6 +8,8 @@
 use core::slice;
 use core::str;
 
+use crate::memory::{MemoryError, PageAllocator};
+
 /// Flattened device tree header magic value.
 const FDT_MAGIC: u32 = 0xd00d_feed;
 /// Structure token marking the start of a node.
@@ -43,6 +45,10 @@ pub enum FdtError {
 
 /// Read-only view of one flattened device tree blob.
 pub struct Fdt<'a> {
+    /// Raw pointer to the start of the validated FDT blob.
+    base: *const u8,
+    /// Total size in bytes of the validated FDT blob.
+    total_size: usize,
     /// Raw reserve map section of the FDT blob.
     reserve_map: &'a [u8],
     /// Raw structure block section of the FDT blob.
@@ -86,9 +92,23 @@ impl<'a> Fdt<'a> {
 
         let blob = unsafe { slice::from_raw_parts(ptr_raw, total_size) };
         Ok(Self {
+            base: ptr_raw,
+            total_size,
             reserve_map: &blob[off_mem_rsvmap..],
             structure: &blob[off_dt_struct..off_dt_struct + size_dt_struct],
             strings: &blob[off_dt_strings..off_dt_strings + size_dt_strings],
+        })
+    }
+
+    /// Reserves the original FDT blob in one EFI-style page allocator.
+    ///
+    /// # Parameters
+    ///
+    /// - `allocator`: Page allocator whose map should reserve the original FDT.
+    pub fn reserve_in(&self, allocator: &mut PageAllocator<'_>) -> Result<(), MemoryError> {
+        allocator.reserve_region(MemoryRegion {
+            base: self.base as u64,
+            size: u64::try_from(self.total_size).map_err(|_| MemoryError::AddressOverflow)?,
         })
     }
 
