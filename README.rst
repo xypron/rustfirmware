@@ -62,7 +62,7 @@ Generate API documentation:
 Run in QEMU
 -----------
 
-Boot the raw firmware image with QEMU. The first run downloads the Ubuntu 26.04 preinstalled RISC-V server image and extracts it to ``test.img``:
+Boot the raw firmware image with QEMU. The first run downloads the Ubuntu 22.04.5 RISC-V server image and extracts it to ``test.img``:
 
 .. code-block:: bash
 
