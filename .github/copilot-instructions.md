@@ -8,3 +8,5 @@
 - At entry, register `a1` contains a pointer to the device tree.
 - Save `a0` and `a1` so they can be passed on to the payload.
 - For git commits in this repository, use the global Git user settings.
+- Document every struct, every function parameter, and every struct field.
+- Document all constants.

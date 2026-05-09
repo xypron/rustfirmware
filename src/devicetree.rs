@@ -1,33 +1,65 @@
+//! Flattened device tree parsing helpers.
+//!
+//! The current implementation is intentionally read-only. It validates the FDT
+//! header, exposes RAM ranges from `/memory`, and reports reserved regions from
+//! both the reserve map and the `/reserved-memory` subtree. The module is meant
+//! to grow into a future device-tree editing layer.
+
 use core::slice;
 use core::str;
 
+/// Flattened device tree header magic value.
 const FDT_MAGIC: u32 = 0xd00d_feed;
+/// Structure token marking the start of a node.
 const FDT_BEGIN_NODE: u32 = 1;
+/// Structure token marking the end of a node.
 const FDT_END_NODE: u32 = 2;
+/// Structure token marking a property record.
 const FDT_PROP: u32 = 3;
+/// Structure token marking a no-op padding entry.
 const FDT_NOP: u32 = 4;
+/// Structure token marking the end of the structure block.
 const FDT_END: u32 = 9;
 
+/// One memory or reserved-memory range decoded from an FDT.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MemoryRegion {
+    /// Start address of the decoded region.
     pub base: u64,
+    /// Size in bytes of the decoded region.
     pub size: u64,
 }
 
+/// Errors returned while validating the flattened device tree blob.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FdtError {
+    /// The blob header did not contain the FDT magic value.
     BadMagic,
+    /// The blob or one of its sections ended before required data was available.
     Truncated,
+    /// The blob version is older than the minimum supported format version.
     UnsupportedVersion,
 }
 
+/// Read-only view of one flattened device tree blob.
 pub struct Fdt<'a> {
+    /// Raw reserve map section of the FDT blob.
     reserve_map: &'a [u8],
+    /// Raw structure block section of the FDT blob.
     structure: &'a [u8],
+    /// Raw strings block section of the FDT blob.
     strings: &'a [u8],
 }
 
 impl<'a> Fdt<'a> {
+    /// Creates an FDT view from a raw pointer passed by the boot environment.
+    ///
+    /// The caller must guarantee that `ptr_raw` points at a valid FDT blob in
+    /// readable memory for the duration of the returned view.
+    ///
+    /// # Parameters
+    ///
+    /// - `ptr_raw`: Raw pointer to the start of the flattened device tree blob.
     pub unsafe fn from_ptr(ptr_raw: *const u8) -> Result<Self, FdtError> {
         if read_be_u32(ptr_raw, 0).ok_or(FdtError::Truncated)? != FDT_MAGIC {
             return Err(FdtError::BadMagic);
@@ -60,6 +92,11 @@ impl<'a> Fdt<'a> {
         })
     }
 
+    /// Collects memory ranges from `/memory` nodes into `output`.
+    ///
+    /// # Parameters
+    ///
+    /// - `output`: Destination slice that receives decoded RAM ranges.
     pub fn memory_regions(&self, output: &mut [MemoryRegion]) -> usize {
         let mut cursor = 0usize;
         let mut depth = 0usize;
@@ -177,6 +214,12 @@ impl<'a> Fdt<'a> {
         count
     }
 
+    /// Collects reserved regions from both the FDT reserve map and the
+    /// `/reserved-memory` subtree into `output`.
+    ///
+    /// # Parameters
+    ///
+    /// - `output`: Destination slice that receives decoded reserved ranges.
     pub fn reserved_regions(&self, output: &mut [MemoryRegion]) -> usize {
         let mut count = self.reserve_map_regions(output);
         if count < output.len() {

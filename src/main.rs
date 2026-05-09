@@ -1,8 +1,18 @@
 #![no_std]
 #![no_main]
 
+//! Freestanding RISC-V firmware entry point.
+//!
+//! The binary boots under OpenSBI, captures the boot hart and incoming device
+//! tree pointer, initializes a fixed stack at the firmware load address, and
+//! then prints diagnostics plus simple storage information through the SBI DBCN
+//! console extension.
+
+/// VirtIO MMIO transport, queue, and block-device support.
 pub mod virtio;
+/// GUID partition table parsing for block devices.
 pub mod gpt;
+/// Flattened device tree parsing helpers used for diagnostics and future edits.
 pub mod devicetree;
 
 use core::arch::{asm, global_asm};
@@ -14,14 +24,23 @@ use gpt::{read_partition_entry, read_primary_header};
 use virtio::qemu_virt_block_devices;
 use virtio::VirtioBlockDriver;
 
+/// SBI extension ID for the debug console extension.
 const SBI_EXT_DBCN: usize = 0x4442_434e;
+/// SBI function ID for buffered debug console writes.
 const SBI_DBCN_CONSOLE_WRITE: usize = 0;
+/// SBI extension ID for the system reset extension.
 const SBI_EXT_SRST: usize = 0x5352_5354;
+/// SBI function ID for system reset requests.
 const SBI_SRST_SYSTEM_RESET: usize = 0;
+/// SRST reset type used to power off the machine.
 const SBI_SRST_RESET_TYPE_SHUTDOWN: usize = 0;
+/// SRST reset reason for a normal shutdown.
 const SBI_SRST_RESET_REASON_NONE: usize = 0;
+/// SRST reset reason for a firmware-detected failure.
 const SBI_SRST_RESET_REASON_SYSTEM_FAILURE: usize = 1;
+/// Top of the fixed firmware-owned stack used after early entry.
 const STACK_TOP: usize = 0x8020_0000;
+/// Build profile name injected by the Makefile for runtime diagnostics.
 const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
     Some(profile) => profile,
     None => "unknown",
@@ -52,10 +71,13 @@ static mut DEVICE_TREE_PTR: usize = 0;
 #[unsafe(no_mangle)]
 static mut ENTRY_STACK_PTR: usize = 0;
 
+/// SBI return pair carrying an error code and one return value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 struct SbiRet {
+    /// SBI error code returned in register `a0`.
     error: usize,
+    /// SBI result value returned in register `a1`.
     value: usize,
 }
 
@@ -63,10 +85,13 @@ pub fn boot_hart_id() -> usize {
     unsafe { ptr::read_volatile(ptr::addr_of!(BOOT_HART_ID)) }
 }
 
+/// Returns the pointer to the flattened device tree passed in register `a1`.
 pub fn device_tree_ptr() -> *const u8 {
     unsafe { ptr::read_volatile(ptr::addr_of!(DEVICE_TREE_PTR)) as *const u8 }
 }
 
+/// Returns the stack pointer value observed at firmware entry, before switching
+/// to the firmware-owned stack.
 pub fn entry_stack_ptr() -> usize {
     unsafe { ptr::read_volatile(ptr::addr_of!(ENTRY_STACK_PTR)) }
 }
@@ -196,6 +221,7 @@ fn diagnostics() {
 }
 
 fn put_hex_usize(value: usize) {
+    /// Hex digit lookup table used for manual number formatting.
     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
     let mut buffer = [0u8; 2 + (core::mem::size_of::<usize>() * 2)];

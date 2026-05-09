@@ -53,6 +53,12 @@ Build the raw firmware image:
 
 The raw binary output is written to ``build/rustfimware.bin``.
 
+Generate API documentation:
+
+.. code-block:: bash
+
+   make docs
+
 Run in QEMU
 -----------
 

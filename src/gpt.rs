@@ -1,35 +1,63 @@
+//! GPT parsing for block devices.
+//!
+//! This module reads the primary GPT header and fixed-size partition entries from
+//! a sector-addressable block device. It is intentionally small and currently
+//! only supports the data needed by the firmware diagnostics output.
+
 use core::str;
 
 use crate::virtio::{BlockDevice, VIRTIO_SECTOR_SIZE};
 
+/// GPT header signature stored at the start of the primary header sector.
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
+/// Number of UTF-16 code units stored in the GPT partition name field.
 const GPT_PARTITION_NAME_LEN: usize = 36;
+/// Minimum supported GPT partition entry size in bytes.
 const GPT_ENTRY_MIN_SIZE: usize = 128;
+/// GPT attribute bit indicating legacy BIOS bootability.
 const GPT_ATTRIBUTE_LEGACY_BIOS_BOOTABLE: u64 = 1 << 2;
+/// Partition type GUID for a generic Linux filesystem partition.
 const GPT_TYPE_GUID_LINUX_FILESYSTEM: [u8; 16] = [
     0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
 ];
+/// Partition type GUID for the EFI system partition.
 const GPT_TYPE_GUID_ESP: [u8; 16] = [
     0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
 ];
 
+/// Parsed fields from the primary GPT header used by this firmware.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GptHeader {
+    /// Starting LBA of the partition entry array.
     pub partition_entry_lba: u64,
+    /// Number of partition entries described by the header.
     pub partition_entry_count: u32,
+    /// Size in bytes of each partition entry.
     pub partition_entry_size: u32,
 }
 
+/// Parsed GPT partition entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GptPartitionEntry {
+    /// Partition type GUID stored in little-endian GPT byte order.
     pub partition_type_guid: [u8; 16],
+    /// Unique GUID assigned to this partition entry.
     pub unique_partition_guid: [u8; 16],
+    /// First LBA owned by the partition.
     pub first_lba: u64,
+    /// Last LBA owned by the partition.
     pub last_lba: u64,
+    /// GPT attribute bitfield for the partition.
     pub attributes: u64,
+    /// UTF-16LE partition name as stored in the GPT entry.
     partition_name: [u16; GPT_PARTITION_NAME_LEN],
 }
 
+/// Reads the primary GPT header from LBA 1.
+///
+/// # Parameters
+///
+/// - `device`: Sector-addressable block device containing the GPT.
 pub fn read_primary_header<D: BlockDevice>(device: &mut D) -> Option<GptHeader> {
     let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
     device.read_sector(1, &mut sector).ok()?;
@@ -50,6 +78,13 @@ pub fn read_primary_header<D: BlockDevice>(device: &mut D) -> Option<GptHeader> 
     })
 }
 
+/// Reads one GPT partition entry by index.
+///
+/// # Parameters
+///
+/// - `device`: Sector-addressable block device containing the GPT.
+/// - `header`: Parsed GPT header describing the partition entry array.
+/// - `index`: Zero-based partition entry index to decode.
 pub fn read_partition_entry<D: BlockDevice>(
     device: &mut D,
     header: &GptHeader,
@@ -91,18 +126,26 @@ pub fn read_partition_entry<D: BlockDevice>(
 }
 
 impl GptPartitionEntry {
+    /// Returns `true` when the partition slot is unused.
     pub fn is_unused(&self) -> bool {
         self.partition_type_guid == [0; 16]
     }
 
+    /// Returns the number of sectors covered by the partition.
     pub fn sector_count(&self) -> u64 {
         self.last_lba - self.first_lba + 1
     }
 
+    /// Returns `true` when the legacy BIOS bootable attribute is set.
     pub fn bootable(&self) -> bool {
         (self.attributes & GPT_ATTRIBUTE_LEGACY_BIOS_BOOTABLE) != 0
     }
 
+    /// Decodes the UTF-16 partition label into a printable ASCII string.
+    ///
+    /// # Parameters
+    ///
+    /// - `buffer`: Scratch buffer that receives the printable label bytes.
     pub fn label<'a>(&self, buffer: &'a mut [u8; 72]) -> &'a str {
         let mut out = 0;
 
@@ -123,6 +166,12 @@ impl GptPartitionEntry {
         unsafe { str::from_utf8_unchecked(&buffer[..out]) }
     }
 
+    /// Returns a friendly partition type name for known GUIDs and the raw GUID
+    /// string for unknown ones.
+    ///
+    /// # Parameters
+    ///
+    /// - `buffer`: Scratch buffer used when formatting an unknown GUID.
     pub fn partition_type<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
         if self.partition_type_guid == GPT_TYPE_GUID_LINUX_FILESYSTEM {
             return "Linux filesystem";
@@ -136,6 +185,7 @@ impl GptPartitionEntry {
     }
 
     fn guid<'a>(&self, buffer: &'a mut [u8; 36]) -> &'a str {
+        /// Hex digit lookup table used when formatting GUID bytes.
         const HEX: &[u8; 16] = b"0123456789abcdef";
 
         let guid = self.partition_type_guid;

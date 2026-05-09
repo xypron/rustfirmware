@@ -14,7 +14,7 @@ QEMU_VIRTIO_MMIO_BUS := virtio-mmio-bus.0
 QEMU_VIRTIO_MMIO_FLAGS := -global virtio-mmio.force-legacy=false
 QEMU_GDB_PORT := 1234
 
-.PHONY: all build elf bin check debug clean
+.PHONY: all build elf bin docs check debug clean
 
 all: bin
 
@@ -29,6 +29,9 @@ bin: elf
 	test -n "$$objcopy" || (echo "error: need rust-objcopy or llvm-objcopy in PATH" >&2; exit 1); \
 	"$$objcopy" -O binary $(ELF) $(BIN)
 	@echo "raw firmware image: $(BIN)"
+
+docs:
+	PROFILE_NAME=$(PROFILE) cargo doc --no-deps
 
 test.img:
 	rm -f test.img test.img.xz
