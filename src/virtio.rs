@@ -438,10 +438,10 @@ impl VirtioBlockDriver {
     ///
     /// The caller must ensure that only one instance uses the shared static
     /// queue/request storage at a time.
-        ///
-        /// # Parameters
-        ///
-        /// - `device`: Probed VirtIO MMIO transport configured as a block device.
+    ///
+    /// # Parameters
+    ///
+    /// - `device`: Probed VirtIO MMIO transport configured as a block device.
     pub unsafe fn new(mut device: VirtioMmioDevice) -> Result<Self, VirtioError> {
         if !device.is_block_device() {
             return Err(VirtioError::NotBlockDevice);
@@ -673,68 +673,146 @@ impl VirtQueue {
         self.layout.total_size
     }
 
+    /// Reads one descriptor entry from the descriptor table.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: Descriptor slot index within the queue.
     pub fn read_descriptor(&self, index: u16) -> VirtqDescriptor {
         debug_assert!(index < self.queue_size());
         unsafe { ptr::read_volatile(self.descriptor_ptr(index)) }
     }
 
+    /// Writes one descriptor entry into the descriptor table.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: Descriptor slot index within the queue.
+    /// - `descriptor`: Descriptor value written to the selected slot.
     pub fn write_descriptor(&mut self, index: u16, descriptor: VirtqDescriptor) {
         debug_assert!(index < self.queue_size());
         unsafe { ptr::write_volatile(self.descriptor_mut_ptr(index), descriptor) }
     }
 
+    /// Returns the available-ring flags field.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
     pub fn avail_flags(&self) -> u16 {
         unsafe { ptr::read_volatile(self.avail_flags_ptr()) }
     }
 
+    /// Writes the available-ring flags field.
+    ///
+    /// # Parameters
+    ///
+    /// - `flags`: New value for the available-ring flags field.
     pub fn set_avail_flags(&mut self, flags: u16) {
         unsafe { ptr::write_volatile(self.avail_flags_mut_ptr(), flags) }
     }
 
+    /// Returns the available-ring index field.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
     pub fn avail_idx(&self) -> u16 {
         unsafe { ptr::read_volatile(self.avail_idx_ptr()) }
     }
 
+    /// Writes the available-ring index field.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: New producer index for the available ring.
     pub fn set_avail_idx(&mut self, index: u16) {
         unsafe { ptr::write_volatile(self.avail_idx_mut_ptr(), index) }
     }
 
+    /// Returns one available-ring entry.
+    ///
+    /// # Parameters
+    ///
+    /// - `slot`: Ring slot to read.
     pub fn avail_ring(&self, slot: u16) -> u16 {
         debug_assert!(slot < self.queue_size());
         unsafe { ptr::read_volatile(self.avail_ring_ptr(slot)) }
     }
 
+    /// Writes one available-ring entry.
+    ///
+    /// # Parameters
+    ///
+    /// - `slot`: Ring slot to update.
+    /// - `descriptor_index`: Descriptor head index published in that slot.
     pub fn set_avail_ring(&mut self, slot: u16, descriptor_index: u16) {
         debug_assert!(slot < self.queue_size());
         unsafe { ptr::write_volatile(self.avail_ring_mut_ptr(slot), descriptor_index) }
     }
 
+    /// Returns the used-ring flags field.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
     pub fn used_flags(&self) -> u16 {
         unsafe { ptr::read_volatile(self.used_flags_ptr()) }
     }
 
+    /// Writes the used-ring flags field.
+    ///
+    /// # Parameters
+    ///
+    /// - `flags`: New value for the used-ring flags field.
     pub fn set_used_flags(&mut self, flags: u16) {
         unsafe { ptr::write_volatile(self.used_flags_mut_ptr(), flags) }
     }
 
+    /// Returns the used-ring index field.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
     pub fn used_idx(&self) -> u16 {
         unsafe { ptr::read_volatile(self.used_idx_ptr()) }
     }
 
+    /// Writes the used-ring index field.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: New consumer index for the used ring.
     pub fn set_used_idx(&mut self, index: u16) {
         unsafe { ptr::write_volatile(self.used_idx_mut_ptr(), index) }
     }
 
+    /// Returns one used-ring element.
+    ///
+    /// # Parameters
+    ///
+    /// - `slot`: Ring slot to read.
     pub fn used_elem(&self, slot: u16) -> VirtqUsedElem {
         debug_assert!(slot < self.queue_size());
         unsafe { ptr::read_volatile(self.used_ring_ptr(slot)) }
     }
 
+    /// Writes one used-ring element.
+    ///
+    /// # Parameters
+    ///
+    /// - `slot`: Ring slot to update.
+    /// - `elem`: Used-ring element written into the selected slot.
     pub fn set_used_elem(&mut self, slot: u16, elem: VirtqUsedElem) {
         debug_assert!(slot < self.queue_size());
         unsafe { ptr::write_volatile(self.used_ring_mut_ptr(slot), elem) }
     }
 
+    /// Returns the optional used-event field when EVENT_IDX is enabled.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
     pub fn used_event(&self) -> Option<u16> {
         if !self.event_idx() {
             return None;
@@ -743,11 +821,21 @@ impl VirtQueue {
         Some(unsafe { ptr::read_volatile(self.used_event_ptr()) })
     }
 
+    /// Writes the used-event field when EVENT_IDX is enabled.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: Event threshold stored in the used-event field.
     pub fn set_used_event(&mut self, event: u16) {
         debug_assert!(self.event_idx());
         unsafe { ptr::write_volatile(self.used_event_mut_ptr(), event) }
     }
 
+    /// Returns the optional available-event field when EVENT_IDX is enabled.
+    ///
+    /// # Parameters
+    ///
+    /// This method does not accept parameters.
     pub fn avail_event(&self) -> Option<u16> {
         if !self.event_idx() {
             return None;
@@ -756,6 +844,11 @@ impl VirtQueue {
         Some(unsafe { ptr::read_volatile(self.avail_event_ptr()) })
     }
 
+    /// Writes the available-event field when EVENT_IDX is enabled.
+    ///
+    /// # Parameters
+    ///
+    /// - `event`: Event threshold stored in the available-event field.
     pub fn set_avail_event(&mut self, event: u16) {
         debug_assert!(self.event_idx());
         unsafe { ptr::write_volatile(self.avail_event_mut_ptr(), event) }

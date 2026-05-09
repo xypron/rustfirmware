@@ -14,15 +14,24 @@ pub mod virtio;
 pub mod gpt;
 /// Flattened device tree parsing helpers used for diagnostics and future edits.
 pub mod devicetree;
+/// Firmware diagnostics output and reporting.
+pub mod diagnostics;
+/// EFI-style page allocator and memory map support.
+pub mod memory;
 
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
 use core::str;
-use devicetree::{Fdt, MemoryRegion};
+use diagnostics::print_diagnostics;
 use gpt::{read_partition_entry, read_primary_header};
 use virtio::qemu_virt_block_devices;
 use virtio::VirtioBlockDriver;
+
+unsafe extern "C" {
+    /// Linker-defined top of the firmware-owned runtime stack.
+    static __stack_top: u8;
+}
 
 /// SBI extension ID for the debug console extension.
 const SBI_EXT_DBCN: usize = 0x4442_434e;
@@ -38,8 +47,6 @@ const SBI_SRST_RESET_TYPE_SHUTDOWN: usize = 0;
 const SBI_SRST_RESET_REASON_NONE: usize = 0;
 /// SRST reset reason for a firmware-detected failure.
 const SBI_SRST_RESET_REASON_SYSTEM_FAILURE: usize = 1;
-/// Top of the fixed firmware-owned stack used after early entry.
-const STACK_TOP: usize = 0x8020_0000;
 /// Build profile name injected by the Makefile for runtime diagnostics.
 const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
     Some(profile) => profile,
@@ -63,12 +70,15 @@ _start:
 );
 
 #[unsafe(no_mangle)]
+/// Boot hart identifier captured from register `a0` at firmware entry.
 static mut BOOT_HART_ID: usize = 0;
 
 #[unsafe(no_mangle)]
+/// Flattened device-tree pointer captured from register `a1` at firmware entry.
 static mut DEVICE_TREE_PTR: usize = 0;
 
 #[unsafe(no_mangle)]
+/// Stack pointer observed on entry before switching to the firmware stack.
 static mut ENTRY_STACK_PTR: usize = 0;
 
 /// SBI return pair carrying an error code and one return value.
@@ -81,6 +91,9 @@ struct SbiRet {
     value: usize,
 }
 
+/// Returns the hart identifier observed at firmware entry.
+///
+/// This function reads the hart identifier from a volatile memory location.
 pub fn boot_hart_id() -> usize {
     unsafe { ptr::read_volatile(ptr::addr_of!(BOOT_HART_ID)) }
 }
@@ -96,6 +109,23 @@ pub fn entry_stack_ptr() -> usize {
     unsafe { ptr::read_volatile(ptr::addr_of!(ENTRY_STACK_PTR)) }
 }
 
+/// Returns the top address of the linker-defined firmware-owned stack.
+pub fn stack_top() -> usize {
+    core::ptr::addr_of!(__stack_top) as usize
+}
+
+/// Performs one SBI environment call with the provided register arguments.
+///
+/// # Parameters
+///
+/// - `arg0`: Value loaded into register `a0` before the call.
+/// - `arg1`: Value loaded into register `a1` before the call.
+/// - `arg2`: Value loaded into register `a2` before the call.
+/// - `arg3`: Value loaded into register `a3` before the call.
+/// - `arg4`: Value loaded into register `a4` before the call.
+/// - `arg5`: Value loaded into register `a5` before the call.
+/// - `fid`: SBI function identifier loaded into register `a6`.
+/// - `eid`: SBI extension identifier loaded into register `a7`.
 fn ecall(
     arg0: usize,
     arg1: usize,
@@ -127,6 +157,11 @@ fn ecall(
     SbiRet { error, value }
 }
 
+/// Writes one string slice through the SBI debug console extension.
+///
+/// # Parameters
+///
+/// - `message`: Text buffer passed to the SBI DBCN console write call.
 fn puts(message: &str) -> SbiRet {
     ecall(
         message.len(),
@@ -140,6 +175,11 @@ fn puts(message: &str) -> SbiRet {
     )
 }
 
+/// Stops forward progress by repeatedly waiting for interrupts.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
 fn halt() -> ! {
     loop {
         unsafe {
@@ -148,6 +188,12 @@ fn halt() -> ! {
     }
 }
 
+/// Requests an SBI system reset and halts if the call returns.
+///
+/// # Parameters
+///
+/// - `reset_type`: SBI reset type passed to the SRST extension.
+/// - `reset_reason`: SBI reset reason passed to the SRST extension.
 fn system_reset(reset_type: usize, reset_reason: usize) -> ! {
     let _ = ecall(
         reset_type,
@@ -163,10 +209,20 @@ fn system_reset(reset_type: usize, reset_reason: usize) -> ! {
     halt()
 }
 
+/// Powers off the machine through the SBI system reset extension.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
 fn poweroff() -> ! {
     system_reset(SBI_SRST_RESET_TYPE_SHUTDOWN, SBI_SRST_RESET_REASON_NONE)
 }
 
+/// Prints the firmware name, version, and build profile.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
 fn greet() -> SbiRet {
     let _ = puts(env!("CARGO_PKG_NAME"));
     let _ = puts(" ");
@@ -176,51 +232,12 @@ fn greet() -> SbiRet {
     puts(")\n")
 }
 
-fn diagnostics() {
-    let _ = puts("diagnostics: boot_hart=");
-    put_decimal_u64(boot_hart_id() as u64);
-    let _ = puts(", entry_sp=");
-    put_hex_usize(entry_stack_ptr());
-    let _ = puts(", stack_top=");
-    put_hex_usize(STACK_TOP);
-    let _ = puts("\n");
-
-    let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
-    let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
-    let (region_count, reserved_count) = match unsafe { Fdt::from_ptr(device_tree_ptr()) } {
-        Ok(fdt) => (fdt.memory_regions(&mut regions), fdt.reserved_regions(&mut reserved)),
-        Err(_) => {
-            let _ = puts("diagnostics: memory-map unavailable\n");
-            return;
-        }
-    };
-
-    let mut index = 0usize;
-    while index < region_count {
-        let _ = puts("memory ");
-        put_decimal_u64((index + 1) as u64);
-        let _ = puts(": base=");
-        put_hex_usize(regions[index].base as usize);
-        let _ = puts(", size=");
-        put_hex_usize(regions[index].size as usize);
-        let _ = puts("\n");
-        index += 1;
-    }
-
-    index = 0;
-    while index < reserved_count {
-        let _ = puts("reserved ");
-        put_decimal_u64((index + 1) as u64);
-        let _ = puts(": base=");
-        put_hex_usize(reserved[index].base as usize);
-        let _ = puts(", size=");
-        put_hex_usize(reserved[index].size as usize);
-        let _ = puts("\n");
-        index += 1;
-    }
-}
-
-fn put_hex_usize(value: usize) {
+/// Prints one `usize` value as a fixed-width hexadecimal number.
+///
+/// # Parameters
+///
+/// - `value`: Machine-sized integer to format and emit.
+pub(crate) fn put_hex_usize(value: usize) {
     /// Hex digit lookup table used for manual number formatting.
     const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -242,13 +259,23 @@ fn put_hex_usize(value: usize) {
     let _ = puts(text);
 }
 
-fn put_small_decimal(value: usize) {
+/// Prints one decimal digit without additional formatting.
+///
+/// # Parameters
+///
+/// - `value`: Single digit value to emit.
+pub(crate) fn put_small_decimal(value: usize) {
     let digit = [b'0' + value as u8];
     let text = unsafe { str::from_utf8_unchecked(&digit) };
     let _ = puts(text);
 }
 
-fn put_decimal_u64(mut value: u64) {
+/// Prints one `u64` value in decimal form.
+///
+/// # Parameters
+///
+/// - `value`: Unsigned integer value to format and emit.
+pub(crate) fn put_decimal_u64(mut value: u64) {
     let mut buffer = [0u8; 20];
     let mut index = buffer.len();
 
@@ -267,6 +294,11 @@ fn put_decimal_u64(mut value: u64) {
     let _ = puts(text);
 }
 
+/// Prints one boolean value as `true` or `false`.
+///
+/// # Parameters
+///
+/// - `value`: Boolean value to emit.
 fn put_bool(value: bool) {
     if value {
         let _ = puts("true");
@@ -275,6 +307,11 @@ fn put_bool(value: bool) {
     }
 }
 
+/// Probes QEMU VirtIO block devices and prints GPT partition information.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
 fn probe_virtio() {
     let mut found_any = false;
 
@@ -340,18 +377,28 @@ fn probe_virtio() {
 }
 
 #[unsafe(no_mangle)]
+/// Firmware entry point reached after early assembly stack setup.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
 extern "C" fn rust_entry() -> ! {
     let _boot_hart = boot_hart_id();
     let _device_tree = device_tree_ptr();
 
     let _ = greet();
-    diagnostics();
+    print_diagnostics();
     probe_virtio();
     let _ = puts("rustfimware: poweroff via sbi srst\n");
     poweroff()
 }
 
 #[panic_handler]
+/// Handles panics by printing a message and powering off the machine.
+///
+/// # Parameters
+///
+/// - `_info`: Panic metadata supplied by the Rust core runtime.
 fn panic(_info: &PanicInfo<'_>) -> ! {
     let _ = puts("rustfimware: panic\n");
     system_reset(SBI_SRST_RESET_TYPE_SHUTDOWN, SBI_SRST_RESET_REASON_SYSTEM_FAILURE)
