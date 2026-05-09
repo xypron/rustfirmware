@@ -14,8 +14,14 @@ pub mod virtio;
 pub mod gpt;
 /// Generic partition-table interfaces for GPT and future MBR support.
 pub mod partition;
+/// Filesystem abstractions shared by FAT and future formats.
+pub mod filesystem;
+/// Linux boot-method request construction.
+pub mod linux;
 /// Read-only FAT filesystem support for loading files by path.
 pub mod fat;
+/// Boot-oriented device-tree object stub.
+pub mod dtb;
 /// Flattened device tree parsing helpers used for diagnostics and future edits.
 pub mod devicetree;
 /// Firmware diagnostics output and reporting.
@@ -27,9 +33,14 @@ use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
 use core::str;
+use devicetree::{Fdt, MemoryRegion};
 use diagnostics::print_diagnostics;
+use dtb::Dtb;
 use fat::FatVolume;
+use filesystem::{FileHandle, FileInfo, FileInfoView, FileSystem, LoadedFile};
 use gpt::GptPartitionTable;
+use linux::{boot as linux_boot, check_kernel_header};
+use memory::{EFI_MEMORY_DESCRIPTOR, PageAllocator};
 use partition::{PartitionEntry, PartitionTable};
 use virtio::{qemu_virt_block_devices, BlockDevice};
 use virtio::VirtioBlockDriver;
@@ -168,7 +179,7 @@ fn ecall(
 /// # Parameters
 ///
 /// - `message`: Text buffer passed to the SBI DBCN console write call.
-fn puts(message: &str) -> SbiRet {
+pub(crate) fn puts(message: &str) -> SbiRet {
     ecall(
         message.len(),
         message.as_ptr() as usize,
@@ -322,6 +333,7 @@ fn put_bool(value: bool) {
 fn list_esp_files<D: BlockDevice>(
     device: &mut D,
     partition_start_lba: u64,
+    block_device_index: usize,
 ) {
     let mut volume = match FatVolume::new(device, partition_start_lba) {
         Ok(volume) => volume,
@@ -342,7 +354,204 @@ fn list_esp_files<D: BlockDevice>(
     if result.is_err() {
         let _ = puts("fat: failed to walk esp files\n");
     }
+
+    try_linux_boot_from_esp(&mut volume, block_device_index);
 }
+
+/// Tries the Linux boot method when `/vmlinux` and `/initrd.img` exist.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted ESP filesystem.
+/// - `block_device_index`: Zero-based virtio block-device index.
+fn try_linux_boot_from_esp<D: BlockDevice>(
+    volume: &mut FatVolume<'_, D>,
+    block_device_index: usize,
+) {
+    let Some((kernel_path, kernel)) = describe_first_file(
+        volume,
+        &["/vmlinux", "/vmlinuz"],
+    ) else {
+        return;
+    };
+    let Some(initrd) = describe_file(volume, "/initrd.img") else {
+        return;
+    };
+    let Some(command_line) = root_command_line(block_device_index) else {
+        let _ = puts("linux: unsupported root device index\n");
+        return;
+    };
+
+    let device_tree = Dtb::new();
+    match linux_boot(&kernel, Some(&initrd), &device_tree, command_line) {
+        Ok(request) => {
+            let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
+            let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
+            let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
+            let mut allocator = match page_allocator_from_live_fdt(
+                &mut regions,
+                &mut reserved,
+                &mut memory_map,
+            ) {
+                Some(allocator) => allocator,
+                None => {
+                    let _ = puts("linux: page allocator unavailable\n");
+                    return;
+                }
+            };
+            let kernel_loaded = match load_file(volume, kernel_path, &mut allocator) {
+                Some(file) => file,
+                None => {
+                    let _ = puts("linux: failed to load ");
+                    let _ = puts(kernel_path);
+                    let _ = puts("\n");
+                    return;
+                }
+            };
+            match check_kernel_header(&kernel_loaded) {
+                Ok(()) => {
+                    let _ = puts("linux: kernel object ");
+                    let _ = puts(kernel_path);
+                    let _ = puts(" matches RISC-V boot image header\n");
+                }
+                Err(_) => {
+                    let _ = puts("linux: kernel object ");
+                    let _ = puts(kernel_path);
+                    let _ = puts(" does not match RISC-V boot image header\n");
+                    return;
+                }
+            }
+            let initrd_loaded = match load_file(volume, "/initrd.img", &mut allocator) {
+                Some(file) => file,
+                None => {
+                    let _ = puts("linux: failed to load /initrd.img\n");
+                    return;
+                }
+            };
+            let _ = puts("linux: boot request invoked ");
+            let _ = puts(kernel_path);
+            let _ = puts("=");
+            put_decimal_u64(request.kernel_size_bytes() as u64);
+            let _ = puts(" @ ");
+            put_hex_usize(kernel_loaded.physical_start() as usize);
+            let _ = puts(", /initrd.img=");
+            put_decimal_u64(request.initrd_size_bytes().unwrap_or(0) as u64);
+            let _ = puts(" @ ");
+            put_hex_usize(initrd_loaded.physical_start() as usize);
+            let _ = puts(", cmdline='");
+            let _ = puts(request.command_line());
+            let _ = puts("'\n");
+        }
+        Err(_) => {
+            let _ = puts("linux: boot request rejected\n");
+        }
+    }
+}
+
+/// Returns detached metadata for one path inside `volume`.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem containing the path.
+/// - `path`: Absolute path to inspect.
+fn describe_file<D: BlockDevice>(
+    volume: &mut FatVolume<'_, D>,
+    path: &str,
+) -> Option<FileInfo> {
+    let file = volume.open(path).ok()?;
+    Some(file.info())
+}
+
+/// Returns detached metadata for the first existing path in `paths`.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem containing the candidate paths.
+/// - `paths`: Ordered candidate paths to inspect.
+fn describe_first_file<'a, D: BlockDevice>(
+    volume: &mut FatVolume<'_, D>,
+    paths: &'a [&'a str],
+) -> Option<(&'a str, FileInfo)> {
+    let mut index = 0usize;
+    while index < paths.len() {
+        let path = paths[index];
+        if let Some(info) = describe_file(volume, path) {
+            return Some((path, info));
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+/// Loads one file from `volume` into EFI-style pages.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem containing the path.
+/// - `path`: Absolute path to load.
+/// - `allocator`: Page allocator used to reserve the destination pages.
+fn load_file<D: BlockDevice>(
+    volume: &mut FatVolume<'_, D>,
+    path: &str,
+    allocator: &mut PageAllocator<'_>,
+) -> Option<LoadedFile> {
+    let mut file = volume.open(path).ok()?;
+    file.load(allocator).ok()
+}
+
+/// Builds a page allocator from the live boot-time device tree.
+///
+/// # Parameters
+///
+/// - `memory_regions`: Scratch slice that receives `/memory` ranges.
+/// - `reserved_regions`: Scratch slice that receives reserved ranges.
+/// - `descriptors`: Descriptor buffer that receives the EFI-style memory map.
+fn page_allocator_from_live_fdt<'a>(
+    memory_regions: &mut [MemoryRegion],
+    reserved_regions: &mut [MemoryRegion],
+    descriptors: &'a mut [EFI_MEMORY_DESCRIPTOR],
+) -> Option<PageAllocator<'a>> {
+    let fdt = unsafe { Fdt::from_ptr(device_tree_ptr()).ok()? };
+    PageAllocator::from_fdt(
+        &fdt,
+        memory_regions,
+        reserved_regions,
+        descriptors,
+    )
+    .ok()
+}
+
+/// Returns the Linux root-device command line for one virtio block device.
+///
+/// # Parameters
+///
+/// - `block_device_index`: Zero-based virtio block-device index.
+fn root_command_line(block_device_index: usize) -> Option<&'static str> {
+    const ROOT_COMMAND_LINES: [&str; 26] = [
+        "root=/dev/vda", "root=/dev/vdb", "root=/dev/vdc",
+        "root=/dev/vdd", "root=/dev/vde", "root=/dev/vdf",
+        "root=/dev/vdg", "root=/dev/vdh", "root=/dev/vdi",
+        "root=/dev/vdj", "root=/dev/vdk", "root=/dev/vdl",
+        "root=/dev/vdm", "root=/dev/vdn", "root=/dev/vdo",
+        "root=/dev/vdp", "root=/dev/vdq", "root=/dev/vdr",
+        "root=/dev/vds", "root=/dev/vdt", "root=/dev/vdu",
+        "root=/dev/vdv", "root=/dev/vdw", "root=/dev/vdx",
+        "root=/dev/vdy", "root=/dev/vdz",
+    ];
+
+    ROOT_COMMAND_LINES.get(block_device_index).copied()
+}
+
+/// Empty descriptor value used for temporary EFI memory-map arrays.
+const EMPTY_MEMORY_DESCRIPTOR: EFI_MEMORY_DESCRIPTOR = EFI_MEMORY_DESCRIPTOR {
+    Type: 0,
+    PhysicalStart: 0,
+    VirtualStart: 0,
+    NumberOfPages: 0,
+    Attribute: 0,
+};
 
 /// Probes QEMU VirtIO block devices and prints GPT partition information.
 ///
@@ -351,6 +560,7 @@ fn list_esp_files<D: BlockDevice>(
 /// This function does not accept parameters.
 fn probe_virtio() {
     let mut found_any = false;
+    let mut block_device_index = 0usize;
 
     for probe in qemu_virt_block_devices() {
         found_any = true;
@@ -359,6 +569,9 @@ fn probe_virtio() {
         let _ = puts(" base ");
         put_hex_usize(probe.device.base_address());
         let _ = puts("\n");
+
+        let current_block_device_index = block_device_index;
+        block_device_index += 1;
 
         let mut driver = match unsafe { VirtioBlockDriver::new(probe.device) } {
             Ok(driver) => driver,
@@ -411,7 +624,11 @@ fn probe_virtio() {
                 let partition_start_lba = partition.first_lba();
                 let _ = puts("fat: walking esp files\n");
                 drop(partitions);
-                list_esp_files(&mut driver, partition_start_lba);
+                list_esp_files(
+                    &mut driver,
+                    partition_start_lba,
+                    current_block_device_index,
+                );
 
                 partitions = match GptPartitionTable::new(&mut driver) {
                     Some(partitions) => partitions,

@@ -5,9 +5,17 @@
 //! and reads complete file contents into a caller-supplied buffer.
 
 use core::char;
-use core::cmp::min;
+use core::cmp::{max, min};
+use core::{ptr, slice};
 use core::str;
 
+use crate::filesystem::{
+    FileHandle, FileInfoView, FileSystem, FileType, LoadedFile,
+};
+use crate::memory::{
+    EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE, EFI_PAGE_SIZE,
+    MemoryError, PageAllocator,
+};
 use crate::virtio::{BlockDevice, VirtioError, VIRTIO_SECTOR_SIZE};
 
 /// Number of UTF-16 code units reserved for one long FAT file name.
@@ -47,6 +55,8 @@ pub enum FatType {
 pub enum FatError {
     /// The underlying block device reported an I/O failure.
     Device(VirtioError),
+    /// The EFI-style page allocator reported an allocation failure.
+    Memory(MemoryError),
     /// The boot sector did not describe a supported FAT filesystem.
     InvalidBootSector,
     /// The mounted volume uses a sector size other than 512 bytes.
@@ -79,6 +89,17 @@ impl From<VirtioError> for FatError {
     /// - `error`: Block-device error to wrap.
     fn from(error: VirtioError) -> Self {
         Self::Device(error)
+    }
+}
+
+impl From<MemoryError> for FatError {
+    /// Converts one page-allocation error into the matching FAT-layer error.
+    ///
+    /// # Parameters
+    ///
+    /// - `error`: Page-allocation error to wrap.
+    fn from(error: MemoryError) -> Self {
+        Self::Memory(error)
     }
 }
 
@@ -117,6 +138,14 @@ struct FatDirectoryEntry {
     file_size: u32,
 }
 
+/// Open FAT path handle used to inspect metadata and load contents.
+pub struct FatFile<'volume, 'device, D: BlockDevice> {
+    /// Mounted volume that owns the file contents.
+    volume: &'volume mut FatVolume<'device, D>,
+    /// Directory entry metadata resolved for the file path.
+    entry: FatDirectoryEntry,
+}
+
 impl FatDirectoryEntry {
     /// Returns `true` when this directory entry represents a directory.
     ///
@@ -125,6 +154,112 @@ impl FatDirectoryEntry {
     /// This function does not accept parameters.
     fn is_directory(&self) -> bool {
         (self.attributes & FAT_ATTRIBUTE_DIRECTORY) != 0
+    }
+
+    /// Returns the external file type represented by this entry.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    fn file_type(&self) -> FileType {
+        if self.is_directory() {
+            FileType::Directory
+        } else {
+            FileType::File
+        }
+    }
+}
+
+impl<'volume, 'device, D: BlockDevice> FileInfoView
+    for FatFile<'volume, 'device, D>
+{
+    /// Returns whether the opened path is a file or a directory.
+    fn file_type(&self) -> FileType {
+        self.entry.file_type()
+    }
+
+    /// Returns the size in bytes associated with the opened path.
+    fn size_bytes(&self) -> usize {
+        self.entry.file_size as usize
+    }
+}
+
+impl<'volume, 'device, D: BlockDevice> FileHandle
+    for FatFile<'volume, 'device, D>
+{
+    type Error = FatError;
+
+    /// Loads the file into page-aligned EFI-style memory.
+    ///
+    /// The allocation is performed as `EfiLoaderData` and always begins at the
+    /// start of a 4 KiB page.
+    ///
+    /// # Parameters
+    ///
+    /// - `allocator`: Page allocator used to reserve the destination pages.
+    fn load(
+        &mut self,
+        allocator: &mut PageAllocator<'_>,
+    ) -> Result<LoadedFile, FatError> {
+        if self.entry.is_directory() {
+            return Err(FatError::IsDirectory);
+        }
+
+        let page_count = max(1, file_size_to_page_count(self.entry.file_size)?);
+        let mut physical_start = 0;
+        allocator.AllocatePages(
+            EFI_ALLOCATE_TYPE::AllocateAnyPages,
+            EFI_MEMORY_TYPE::EfiLoaderData,
+            page_count,
+            &mut physical_start,
+        )?;
+
+        let allocation_size = page_count * EFI_PAGE_SIZE as usize;
+        let buffer = unsafe {
+            slice::from_raw_parts_mut(
+                physical_start as *mut u8,
+                allocation_size,
+            )
+        };
+        unsafe {
+            ptr::write_bytes(buffer.as_mut_ptr(), 0, buffer.len());
+        }
+
+        self.volume.read_file_contents(
+            self.entry.first_cluster,
+            self.entry.file_size,
+            &mut buffer[..self.entry.file_size as usize],
+        )?;
+
+        Ok(LoadedFile::new(
+            physical_start,
+            page_count,
+            self.entry.file_size as usize,
+        ))
+    }
+}
+
+impl<'a, D: BlockDevice> FileSystem for FatVolume<'a, D> {
+    type Error = FatError;
+    type File<'file>
+        = FatFile<'file, 'a, D>
+    where
+        Self: 'file;
+
+    /// Opens one path as a filesystem file handle.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: Absolute or relative path inside the mounted filesystem.
+    fn open<'file>(
+        &'file mut self,
+        path: &str,
+    ) -> Result<Self::File<'file>, Self::Error> {
+        let entry = self.find_path_entry(path)?;
+        Ok(FatFile {
+            volume: self,
+            entry,
+        })
     }
 }
 
@@ -1161,4 +1296,18 @@ fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
 fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let data = bytes.get(offset..offset + 4)?;
     Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// Converts one FAT file size into the number of 4 KiB pages required.
+///
+/// # Parameters
+///
+/// - `file_size`: Logical file size in bytes.
+fn file_size_to_page_count(file_size: u32) -> Result<usize, FatError> {
+    let page_size = EFI_PAGE_SIZE as usize;
+    let page_count = (file_size as usize)
+        .checked_add(page_size - 1)
+        .ok_or(FatError::InvalidBootSector)?
+        / page_size;
+    Ok(page_count)
 }
