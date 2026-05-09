@@ -1,4 +1,4 @@
 /target
 /build
-/test.img
-/test.img.xz
+/test.img*
+/.*.swp
