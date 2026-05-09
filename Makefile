@@ -38,7 +38,7 @@ $(BIN): $(ELF)
 	@echo "raw firmware image: $(BIN)"
 
 docs:
-	PROFILE_NAME=$(PROFILE) cargo doc --no-deps
+	PROFILE_NAME=$(PROFILE) cargo doc --no-deps --bin $(PACKAGE)
 
 test.img:
 	if [ ! -f test.img.xz ]; then wget $(UBUNTU_IMG_URL) -O test.img.xz; fi

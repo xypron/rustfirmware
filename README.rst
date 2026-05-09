@@ -54,7 +54,7 @@ Build the raw firmware image:
 
 .. code-block:: bash
 
-   make bin
+   make
 
 The raw binary output is written to ``build/rustfimware.bin``.
 
