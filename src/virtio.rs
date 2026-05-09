@@ -119,19 +119,22 @@ pub enum VirtioError {
     FeatureNegotiationFailed,
     /// The in-memory virtqueue layout could not be constructed.
     QueueCreationFailed,
+    /// The caller supplied a buffer whose length is not a whole number of sectors.
+    InvalidBufferLength,
     /// The device completed a block request with a non-zero status byte.
     BlockRequestFailed(u8),
 }
 
 /// Minimal block-device abstraction used by the GPT parser.
 pub trait BlockDevice {
-    /// Reads one 512-byte sector into `buffer`.
+    /// Reads one or more contiguous 512-byte sectors into `buffer`.
     ///
     /// # Parameters
     ///
-    /// - `sector`: Logical block address of the sector to read.
+    /// - `sector`: Logical block address of the first sector to read.
     /// - `buffer`: Destination buffer that receives the sector contents.
-    fn read_sector(&mut self, sector: u64, buffer: &mut [u8; VIRTIO_SECTOR_SIZE]) -> Result<(), VirtioError>;
+    ///   Its length must be a non-zero multiple of `VIRTIO_SECTOR_SIZE`.
+    fn read_blocks(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), VirtioError>;
 }
 
 /// Header placed at the front of each VirtIO block request.
@@ -501,7 +504,13 @@ impl VirtioBlockDriver {
 }
 
 impl BlockDevice for VirtioBlockDriver {
-    fn read_sector(&mut self, sector: u64, buffer: &mut [u8; VIRTIO_SECTOR_SIZE]) -> Result<(), VirtioError> {
+    fn read_blocks(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), VirtioError> {
+        if buffer.is_empty() || (buffer.len() % VIRTIO_SECTOR_SIZE) != 0 {
+            return Err(VirtioError::InvalidBufferLength);
+        }
+
+        let buffer_len = u32::try_from(buffer.len()).map_err(|_| VirtioError::InvalidBufferLength)?;
+
         unsafe {
             ptr::write(
                 ptr::addr_of_mut!(VIRTIO_BLOCK_REQUEST_HEADER),
@@ -527,7 +536,7 @@ impl BlockDevice for VirtioBlockDriver {
             1,
             VirtqDescriptor {
                 addr: buffer.as_mut_ptr() as u64,
-                len: VIRTIO_SECTOR_SIZE as u32,
+                len: buffer_len,
                 flags: VIRTQ_DESC_F_WRITE | VIRTQ_DESC_F_NEXT,
                 next: 2,
             },

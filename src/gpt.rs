@@ -14,6 +14,8 @@ const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 const GPT_PARTITION_NAME_LEN: usize = 36;
 /// Minimum supported GPT partition entry size in bytes.
 const GPT_ENTRY_MIN_SIZE: usize = 128;
+/// Maximum temporary read size needed to decode one GPT entry.
+const GPT_ENTRY_READ_BUFFER_SIZE: usize = VIRTIO_SECTOR_SIZE * 2;
 /// GPT attribute bit indicating legacy BIOS bootability.
 const GPT_ATTRIBUTE_LEGACY_BIOS_BOOTABLE: u64 = 1 << 2;
 /// Partition type GUID for a generic Linux filesystem partition.
@@ -60,7 +62,7 @@ pub struct GptPartitionEntry {
 /// - `device`: Sector-addressable block device containing the GPT.
 pub fn read_primary_header<D: BlockDevice>(device: &mut D) -> Option<GptHeader> {
     let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
-    device.read_sector(1, &mut sector).ok()?;
+    device.read_blocks(1, &mut sector).ok()?;
 
     if &sector[0..8] != GPT_SIGNATURE {
         return None;
@@ -94,18 +96,17 @@ pub fn read_partition_entry<D: BlockDevice>(
         return None;
     }
 
-    let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
+    let mut sectors = [0u8; GPT_ENTRY_READ_BUFFER_SIZE];
     let entry_size = header.partition_entry_size as usize;
     let entry_offset = index as usize * entry_size;
     let sector_lba = header.partition_entry_lba + (entry_offset / VIRTIO_SECTOR_SIZE) as u64;
     let sector_offset = entry_offset % VIRTIO_SECTOR_SIZE;
 
-    if sector_offset + GPT_ENTRY_MIN_SIZE > VIRTIO_SECTOR_SIZE {
-        return None;
-    }
+    let sectors_to_read = required_entry_sectors(sector_offset)?;
+    let bytes_to_read = sectors_to_read * VIRTIO_SECTOR_SIZE;
 
-    device.read_sector(sector_lba, &mut sector).ok()?;
-    let entry = &sector[sector_offset..sector_offset + GPT_ENTRY_MIN_SIZE];
+    device.read_blocks(sector_lba, &mut sectors[..bytes_to_read]).ok()?;
+    let entry = &sectors[sector_offset..sector_offset + GPT_ENTRY_MIN_SIZE];
 
     let mut partition_name = [0u16; GPT_PARTITION_NAME_LEN];
     let mut name_index = 0;
@@ -123,6 +124,16 @@ pub fn read_partition_entry<D: BlockDevice>(
         attributes: read_u64(entry, 48)?,
         partition_name,
     })
+}
+
+/// Returns the number of sectors that must be read to decode one GPT entry.
+///
+/// # Parameters
+///
+/// - `sector_offset`: Byte offset of the entry within its starting sector.
+fn required_entry_sectors(sector_offset: usize) -> Option<usize> {
+    let bytes_needed = sector_offset.checked_add(GPT_ENTRY_MIN_SIZE)?;
+    Some(bytes_needed.div_ceil(VIRTIO_SECTOR_SIZE))
 }
 
 impl GptPartitionEntry {
