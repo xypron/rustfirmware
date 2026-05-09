@@ -3,6 +3,8 @@ rustfimware
 
 Freestanding RISC-V firmware written in Rust.
 
+License: GPL-2.0-only. See ``LICENSE``.
+
 Project constraints
 -------------------
 
