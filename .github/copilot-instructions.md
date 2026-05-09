@@ -8,6 +8,8 @@
 - At entry, register `a1` contains a pointer to the device tree.
 - Save `a0` and `a1` so they can be passed on to the payload.
 - For git commits in this repository, use the global Git user settings.
+- All git commits in this repository must include a `Signed-off-by:`
+  trailer.
 - Prefer a maximum line length of 80 characters in both code and
 	documentation.
 - Add rustdoc comments for every module, static, constant, type alias, enum, struct, function, and method, including non-public helpers.
