@@ -6,10 +6,16 @@
 //! RISC-V Linux boot header, and can then transfer control into the kernel.
 
 use crate::dtb::{Dtb, DtbError};
-use crate::filesystem::{FileInfo, FileInfoView, FileType, LoadedFile};
-use crate::memory::PageAllocator;
+use crate::ext4::Ext4Volume;
+use crate::filesystem::{load_first_file, FileInfo, FileInfoView, FileSystem, FileType, LoadedFile};
+use crate::fat::FatVolume;
+use crate::memory::{AllocationDirection, EFI_MEMORY_TYPE, PageAllocator};
+use crate::partition::PartitionEntry;
+use crate::virtio::BlockDevice;
 use core::arch::asm;
 use core::mem::offset_of;
+use core::ptr;
+use core::str;
 
 /// RISC-V Linux boot image header size in bytes.
 const RISCV_LINUX_HEADER_SIZE: usize = 64;
@@ -19,6 +25,53 @@ const LINUX_DTB_EXTRA_SIZE: usize = 8 * 1024;
 const RISCV_LINUX_MAGIC: u64 = 0x5643_5349_52;
 /// Required RISC-V Linux boot header second magic value, little-endian.
 const RISCV_LINUX_MAGIC2: u32 = 0x0543_5352;
+/// RISC-V Linux kernels must be loaded at a 2 MiB-aligned address.
+const KERNEL_ALIGNMENT: u64 = 2 * 1024 * 1024;
+
+/// Fixed-capacity owned boot path stored without external pointers.
+#[derive(Clone, Copy)]
+struct BootPath {
+    /// UTF-8 bytes for the path text.
+    bytes: [u8; 16],
+    /// Number of initialized bytes in `bytes`.
+    len: usize,
+}
+
+impl BootPath {
+    /// Builds one boot path by copying the provided byte slice.
+    ///
+    /// # Parameters
+    ///
+    /// - `bytes`: UTF-8 path bytes to store inline.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > 16 {
+            return None;
+        }
+
+        let mut path_bytes = [0u8; 16];
+        path_bytes[..bytes.len()].copy_from_slice(bytes);
+        Some(Self {
+            bytes: path_bytes,
+            len: bytes.len(),
+        })
+    }
+
+    /// Returns the stored path as a UTF-8 string slice.
+    fn as_str(&self) -> &str {
+        unsafe { str::from_utf8_unchecked(&self.bytes[..self.len]) }
+    }
+}
+
+impl AsRef<str> for BootPath {
+    /// Returns the stored path as a string slice.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 
 /// Parsed RISC-V Linux boot image header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -161,6 +214,234 @@ pub enum LinuxBootError {
     DeviceTreeClone(DtbError),
     /// Updating the cloned device tree for Linux boot failed.
     DeviceTreeUpdate(DtbError),
+}
+
+/// Filesystem classification derived from probing one partition start sector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LinuxBootFilesystem {
+    /// The partition mounted successfully as FAT.
+    Fat,
+    /// The partition mounted successfully as ext4.
+    Ext4,
+    /// The partition did not match the supported filesystem probes.
+    Unknown,
+}
+
+/// Returns one kernel candidate path by search order.
+///
+/// # Parameters
+///
+/// - `index`: Zero-based candidate index.
+fn kernel_candidate_path(index: usize) -> Option<BootPath> {
+    match index {
+        0 => BootPath::from_bytes(b"/boot/vmlinuz"),
+        1 => BootPath::from_bytes(b"/vmlinuz"),
+        _ => None,
+    }
+}
+
+/// Returns one initrd candidate path by search order.
+///
+/// # Parameters
+///
+/// - `index`: Zero-based candidate index.
+fn initrd_candidate_path(index: usize) -> Option<BootPath> {
+    match index {
+        0 => BootPath::from_bytes(b"/boot/initrd.img"),
+        1 => BootPath::from_bytes(b"/initrd.img"),
+        _ => None,
+    }
+}
+
+/// Tries the Linux boot method using one mounted filesystem and root partition.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem chosen from the boot partition.
+/// - `filesystem_name`: Filesystem label used in loaded-file logs.
+/// - `allocator`: Live page allocator reused for artifact loads and DTB cloning.
+/// - `block_device_index`: Zero-based virtio block-device index.
+/// - `partition_number`: One-based partition number within the GPT.
+/// - `boot_hart`: Original hart identifier received from OpenSBI.
+/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
+pub fn try_boot_from_filesystem<F: FileSystem>(
+    volume: &mut F,
+    filesystem_name: &str,
+    allocator: &mut PageAllocator<'_>,
+    block_device_index: usize,
+    partition_number: u32,
+    boot_hart: usize,
+    device_tree_ptr: *const u8,
+) {
+    let Some((kernel_path, kernel_loaded)) = load_first_file(
+        volume,
+        kernel_candidate_path,
+        allocator,
+        filesystem_name,
+    ) else {
+        return;
+    };
+    let initrd_loaded = load_first_file(
+        volume,
+        initrd_candidate_path,
+        allocator,
+        filesystem_name,
+    );
+
+    let mut command_line_buffer = [0u8; 24];
+    let Some(command_line) = root_command_line(
+        block_device_index,
+        partition_number,
+        &mut command_line_buffer,
+    ) else {
+        crate::println!("linux: unsupported root device index");
+        return;
+    };
+
+    let device_tree = match Dtb::from_ptr(device_tree_ptr) {
+        Ok(device_tree) => device_tree,
+        Err(_) => {
+            crate::println!("linux: invalid device-tree pointer");
+            return;
+        }
+    };
+
+    match check_kernel_header(&kernel_loaded) {
+        Ok(()) => {
+            crate::println!(
+                "linux: kernel object {} matches RISC-V boot image header",
+                kernel_path.as_str(),
+            );
+        }
+        Err(_) => {
+            crate::println!(
+                "linux: kernel object {} does not match RISC-V boot image header",
+                kernel_path.as_str(),
+            );
+            return;
+        }
+    }
+
+    let kernel_loaded = match relocate_kernel(allocator, &kernel_loaded) {
+        Some(kernel_loaded) => kernel_loaded,
+        None => {
+            crate::println!("linux: failed to relocate kernel to aligned memory");
+            return;
+        }
+    };
+    crate::println!(
+        "linux: relocated kernel image to {:#018x}",
+        kernel_loaded.physical_start() as usize,
+    );
+
+    let initrd_loaded = initrd_loaded.as_ref().map(|(path, loaded)| (path.as_str(), loaded));
+
+    let _ = boot_and_start(
+        &kernel_loaded,
+        initrd_loaded,
+        &device_tree,
+        allocator,
+        command_line,
+        boot_hart,
+    );
+}
+
+/// Tries the Linux boot method on one boot-flagged partition.
+///
+/// # Parameters
+///
+/// - `device`: Block device that contains the partition.
+/// - `partition`: Partition entry chosen for Linux boot.
+/// - `filesystem`: Filesystem classification derived from probing the partition start.
+/// - `block_device_index`: Zero-based virtio block-device index.
+/// - `partition_number`: One-based partition number within the GPT.
+/// - `boot_hart`: Original hart identifier received from OpenSBI.
+/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
+pub fn try_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
+    device: &mut D,
+    partition: P,
+    filesystem: LinuxBootFilesystem,
+    block_device_index: usize,
+    partition_number: u32,
+    boot_hart: usize,
+    device_tree_ptr: *const u8,
+) {
+    match filesystem {
+        LinuxBootFilesystem::Fat => {
+            let mut volume = match FatVolume::new(device, partition.first_lba()) {
+                Ok(volume) => volume,
+                Err(_) => return,
+            };
+            try_boot_from_volume(
+                &mut volume,
+                "fat",
+                block_device_index,
+                partition_number,
+                boot_hart,
+                device_tree_ptr,
+            );
+        }
+        LinuxBootFilesystem::Ext4 => {
+            let mut volume = match Ext4Volume::new(device, partition.first_lba()) {
+                Ok(volume) => volume,
+                Err(_) => return,
+            };
+            try_boot_from_volume(
+                &mut volume,
+                "ext4",
+                block_device_index,
+                partition_number,
+                boot_hart,
+                device_tree_ptr,
+            );
+        }
+        LinuxBootFilesystem::Unknown => {}
+    }
+}
+
+/// Tries the Linux boot method using one mounted filesystem on a boot-flagged partition.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem chosen from the boot-flagged partition.
+/// - `filesystem_name`: Filesystem label used in loaded-file logs.
+/// - `block_device_index`: Zero-based virtio block-device index.
+/// - `partition_number`: One-based partition number within the GPT.
+/// - `boot_hart`: Original hart identifier received from OpenSBI.
+/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
+fn try_boot_from_volume<F: FileSystem>(
+    volume: &mut F,
+    filesystem_name: &str,
+    block_device_index: usize,
+    partition_number: u32,
+    boot_hart: usize,
+    device_tree_ptr: *const u8,
+) {
+    let mut regions = [crate::devicetree::MemoryRegion { base: 0, size: 0 }; 8];
+    let mut reserved = [crate::devicetree::MemoryRegion { base: 0, size: 0 }; 16];
+    let mut memory_map = [crate::EMPTY_MEMORY_DESCRIPTOR; 32];
+    let mut allocator = match crate::page_allocator_from_live_fdt(
+        device_tree_ptr,
+        &mut regions,
+        &mut reserved,
+        &mut memory_map,
+    ) {
+        Some(allocator) => allocator,
+        None => {
+            crate::println!("linux: page allocator unavailable");
+            return;
+        }
+    };
+
+    try_boot_from_filesystem(
+        volume,
+        filesystem_name,
+        &mut allocator,
+        block_device_index,
+        partition_number,
+        boot_hart,
+        device_tree_ptr,
+    );
 }
 
 /// Builds one Linux boot request from already-selected boot artifacts.
@@ -334,6 +615,89 @@ pub unsafe fn start(
             options(noreturn)
         );
     }
+}
+
+/// Returns the Linux root-device command line for one virtio block device and partition.
+///
+/// # Parameters
+///
+/// - `block_device_index`: Zero-based virtio block-device index.
+/// - `partition_number`: One-based partition number selected for boot.
+fn root_command_line<'a>(
+    block_device_index: usize,
+    partition_number: u32,
+    buffer: &'a mut [u8; 24],
+) -> Option<&'a str> {
+    if block_device_index >= 26 {
+        return None;
+    }
+
+    let prefix = b"root=/dev/vda";
+    buffer[..prefix.len()].copy_from_slice(prefix);
+    buffer[prefix.len() - 1] = b'a' + block_device_index as u8;
+
+    let mut digits = [0u8; 10];
+    let mut digit_count = 0usize;
+    let mut value = partition_number;
+    loop {
+        digits[digit_count] = b'0' + (value % 10) as u8;
+        digit_count += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+
+    let mut index = 0usize;
+    while index < digit_count {
+        buffer[prefix.len() + index] = digits[digit_count - 1 - index];
+        index += 1;
+    }
+
+    Some(unsafe {
+        str::from_utf8_unchecked(&buffer[..prefix.len() + digit_count])
+    })
+}
+
+/// Copies one loaded kernel image into a low 2 MiB-aligned memory slot.
+///
+/// # Parameters
+///
+/// - `allocator`: Live page allocator reused for Linux boot allocations.
+/// - `kernel_loaded`: Loaded kernel image currently stored in high memory.
+fn relocate_kernel(
+    allocator: &mut PageAllocator<'_>,
+    kernel_loaded: &LoadedFile,
+) -> Option<LoadedFile> {
+    let relocated_start = allocator
+        .allocate_aligned_pages_for_size(
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+            kernel_loaded.size_bytes(),
+            KERNEL_ALIGNMENT,
+            AllocationDirection::Low,
+        )
+        .ok()?;
+
+    unsafe {
+        ptr::copy_nonoverlapping(
+            kernel_loaded.physical_start() as *const u8,
+            relocated_start as *mut u8,
+            kernel_loaded.size_bytes(),
+        );
+    }
+
+    allocator
+        .FreePages(
+            kernel_loaded.physical_start(),
+            kernel_loaded.page_count(),
+        )
+        .ok()?;
+
+    Some(LoadedFile::new(
+        relocated_start,
+        kernel_loaded.page_count(),
+        kernel_loaded.size_bytes(),
+    ))
 }
 
 /// Parses the fixed-size Linux boot image header from `bytes`.

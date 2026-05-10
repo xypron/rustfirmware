@@ -39,18 +39,12 @@ pub mod memory;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
-use core::str;
 use devicetree::{Fdt, MemoryRegion};
 use diagnostics::print_diagnostics;
-use dtb::Dtb;
-use ext4::Ext4Volume;
-use fat::FatVolume;
-use filesystem::{load_first_file, LoadedFile};
 use gpt::GptPartitionTable;
-use linux::{boot_and_start as linux_boot_and_start, check_kernel_header};
+use linux::{try_boot_from_partition as linux_try_boot_from_partition, LinuxBootFilesystem};
 use memory::{
-    AllocationDirection, EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR,
-    EFI_MEMORY_TYPE, PageAllocator,
+    EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR, EFI_MEMORY_TYPE, PageAllocator,
 };
 use partition::{PartitionEntry, PartitionTable};
 use sbi::{poweroff, poweroff_on_failure};
@@ -75,9 +69,6 @@ const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
 };
 /// OpenSBI loads the primary firmware image at this physical address on QEMU virt.
 const PRIMARY_FIRMWARE_LOAD_ADDRESS: usize = 0x8020_0000;
-/// RISC-V Linux kernels must be loaded at a 2 MiB-aligned address.
-const KERNEL_ALIGNMENT: u64 = 2 * 1024 * 1024;
-
 global_asm!(
     r#"
     .section .text.entry
@@ -167,381 +158,6 @@ fn greet() {
         env!("CARGO_PKG_VERSION"),
         BUILD_PROFILE,
     );
-}
-
-/// Fixed-capacity owned boot path stored without external pointers.
-#[derive(Clone, Copy)]
-struct BootPath {
-    /// UTF-8 bytes for the path text.
-    bytes: [u8; 16],
-    /// Number of initialized bytes in `bytes`.
-    len: usize,
-}
-
-impl BootPath {
-    /// Builds one boot path by copying the provided byte slice.
-    ///
-    /// # Parameters
-    ///
-    /// - `bytes`: UTF-8 path bytes to store inline.
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() > 16 {
-            return None;
-        }
-
-        let mut path_bytes = [0u8; 16];
-        path_bytes[..bytes.len()].copy_from_slice(bytes);
-        Some(Self {
-            bytes: path_bytes,
-            len: bytes.len(),
-        })
-    }
-
-    /// Returns the stored path as a UTF-8 string slice.
-    fn as_str(&self) -> &str {
-        unsafe { str::from_utf8_unchecked(&self.bytes[..self.len]) }
-    }
-}
-
-impl AsRef<str> for BootPath {
-    /// Returns the stored path as a string slice.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-/// Returns one kernel candidate path by search order.
-///
-/// # Parameters
-///
-/// - `index`: Zero-based candidate index.
-fn kernel_candidate_path(index: usize) -> Option<BootPath> {
-    match index {
-        0 => BootPath::from_bytes(b"/boot/vmlinuz"),
-        1 => BootPath::from_bytes(b"/vmlinuz"),
-        _ => None,
-    }
-}
-
-/// Returns one initrd candidate path by search order.
-///
-/// # Parameters
-///
-/// - `index`: Zero-based candidate index.
-fn initrd_candidate_path(index: usize) -> Option<BootPath> {
-    match index {
-        0 => BootPath::from_bytes(b"/boot/initrd.img"),
-        1 => BootPath::from_bytes(b"/initrd.img"),
-        _ => None,
-    }
-}
-
-/// Tries the Linux boot method on one boot-flagged partition.
-///
-/// # Parameters
-///
-/// - `device`: Block device that contains the partition.
-/// - `partition`: Partition entry chosen for Linux boot.
-/// - `filesystem`: Filesystem classification derived from probing the partition start.
-/// - `block_device_index`: Zero-based virtio block-device index.
-/// - `partition_number`: One-based partition number within the GPT.
-/// - `boot_hart`: Original hart identifier received from OpenSBI.
-/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
-fn try_linux_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
-    device: &mut D,
-    partition: P,
-    filesystem: DetectedFilesystem,
-    block_device_index: usize,
-    partition_number: u32,
-    boot_hart: usize,
-    device_tree_ptr: *const u8,
-) {
-    match filesystem {
-        DetectedFilesystem::Fat => {
-            let mut volume = match FatVolume::new(device, partition.first_lba()) {
-                Ok(volume) => volume,
-                Err(_) => return,
-            };
-            try_linux_boot_from_fat_volume(
-                &mut volume,
-                "fat",
-                block_device_index,
-                partition_number,
-                boot_hart,
-                device_tree_ptr,
-            );
-        }
-        DetectedFilesystem::Ext4 => {
-            let mut volume = match Ext4Volume::new(device, partition.first_lba()) {
-                Ok(volume) => volume,
-                Err(_) => return,
-            };
-            try_linux_boot_from_ext4_volume(
-                &mut volume,
-                "ext4",
-                block_device_index,
-                partition_number,
-                boot_hart,
-                device_tree_ptr,
-            );
-        }
-        DetectedFilesystem::Unknown => {}
-    }
-}
-
-/// Tries the Linux boot method using one FAT filesystem on a boot-flagged partition.
-///
-/// # Parameters
-///
-/// - `volume`: Mounted FAT filesystem chosen from the boot-flagged partition.
-/// - `filesystem_name`: Filesystem label used in loaded-file logs.
-/// - `block_device_index`: Zero-based virtio block-device index.
-/// - `partition_number`: One-based partition number within the GPT.
-/// - `boot_hart`: Original hart identifier received from OpenSBI.
-/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
-fn try_linux_boot_from_fat_volume<D: BlockDevice>(
-    volume: &mut FatVolume<'_, D>,
-    filesystem_name: &str,
-    block_device_index: usize,
-    partition_number: u32,
-    boot_hart: usize,
-    device_tree_ptr: *const u8,
-) {
-    let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
-    let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
-    let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
-    let mut allocator = match page_allocator_from_live_fdt(
-        device_tree_ptr,
-        &mut regions,
-        &mut reserved,
-        &mut memory_map,
-    ) {
-        Some(allocator) => allocator,
-        None => {
-            crate::println!("linux: page allocator unavailable");
-            return;
-        }
-    };
-
-    let Some((kernel_path, kernel_loaded)) = load_first_file(
-        volume,
-        kernel_candidate_path,
-        &mut allocator,
-        filesystem_name,
-    ) else {
-        return;
-    };
-    let initrd_loaded = load_first_file(
-        volume,
-        initrd_candidate_path,
-        &mut allocator,
-        filesystem_name,
-    );
-
-    // Reuse the same allocator state for artifact loads and DTB cloning so
-    // later allocations cannot overlap the already-loaded kernel or initrd.
-    boot_loaded_linux_artifacts(
-        &kernel_path,
-        &kernel_loaded,
-        initrd_loaded.as_ref().map(|(path, file)| (path, file)),
-        &mut allocator,
-        block_device_index,
-        partition_number,
-        boot_hart,
-        device_tree_ptr,
-    );
-}
-
-/// Tries the Linux boot method using one ext4 filesystem on a boot-flagged partition.
-///
-/// # Parameters
-///
-/// - `volume`: Mounted ext4 filesystem chosen from the boot-flagged partition.
-/// - `filesystem_name`: Filesystem label used in loaded-file logs.
-/// - `block_device_index`: Zero-based virtio block-device index.
-/// - `partition_number`: One-based partition number within the GPT.
-/// - `boot_hart`: Original hart identifier received from OpenSBI.
-/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
-fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
-    volume: &mut Ext4Volume<'_, D>,
-    filesystem_name: &str,
-    block_device_index: usize,
-    partition_number: u32,
-    boot_hart: usize,
-    device_tree_ptr: *const u8,
-) {
-    let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
-    let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
-    let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
-    let mut allocator = match page_allocator_from_live_fdt(
-        device_tree_ptr,
-        &mut regions,
-        &mut reserved,
-        &mut memory_map,
-    ) {
-        Some(allocator) => allocator,
-        None => {
-            crate::println!("linux: page allocator unavailable");
-            return;
-        }
-    };
-
-    let Some((kernel_path, kernel_loaded)) = load_first_file(
-        volume,
-        kernel_candidate_path,
-        &mut allocator,
-        filesystem_name,
-    ) else {
-        return;
-    };
-    let initrd_loaded = load_first_file(
-        volume,
-        initrd_candidate_path,
-        &mut allocator,
-        filesystem_name,
-    );
-
-    // Reuse the same allocator state for artifact loads and DTB cloning so
-    // later allocations cannot overlap the already-loaded kernel or initrd.
-    boot_loaded_linux_artifacts(
-        &kernel_path,
-        &kernel_loaded,
-        initrd_loaded.as_ref().map(|(path, file)| (path, file)),
-        &mut allocator,
-        block_device_index,
-        partition_number,
-        boot_hart,
-        device_tree_ptr,
-    );
-}
-
-/// Tries the Linux boot method using already loaded boot artifacts.
-///
-/// # Parameters
-///
-/// - `kernel_path`: Absolute path of the loaded kernel image.
-/// - `kernel_loaded`: Loaded kernel image placed at the Linux load address.
-/// - `initrd_loaded`: Optional loaded initrd image, preserved when present.
-/// - `allocator`: Live page allocator reused for DTB cloning after artifact loads.
-/// - `block_device_index`: Zero-based virtio block-device index.
-/// - `partition_number`: One-based partition number within the GPT.
-/// - `boot_hart`: Original hart identifier received from OpenSBI.
-/// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
-fn boot_loaded_linux_artifacts(
-    kernel_path: &BootPath,
-    kernel_loaded: &LoadedFile,
-    initrd_loaded: Option<(&BootPath, &LoadedFile)>,
-    allocator: &mut PageAllocator<'_>,
-    block_device_index: usize,
-    partition_number: u32,
-    boot_hart: usize,
-    device_tree_ptr: *const u8,
-) {
-    let mut command_line_buffer = [0u8; 24];
-    let Some(command_line) = root_command_line(
-        block_device_index,
-        partition_number,
-        &mut command_line_buffer,
-    ) else {
-        crate::println!("linux: unsupported root device index");
-        return;
-    };
-
-    let device_tree = match Dtb::from_ptr(device_tree_ptr) {
-        Ok(device_tree) => device_tree,
-        Err(_) => {
-            crate::println!("linux: invalid device-tree pointer");
-            return;
-        }
-    };
-    match check_kernel_header(kernel_loaded) {
-        Ok(()) => {
-            crate::println!(
-                "linux: kernel object {} matches RISC-V boot image header",
-                kernel_path.as_str(),
-            );
-        }
-        Err(_) => {
-            crate::println!(
-                "linux: kernel object {} does not match RISC-V boot image header",
-                kernel_path.as_str(),
-            );
-            return;
-        }
-    }
-    let kernel_loaded = match relocate_linux_kernel(allocator, kernel_loaded) {
-        Some(kernel_loaded) => kernel_loaded,
-        None => {
-            crate::println!(
-                "linux: failed to relocate kernel to aligned memory"
-            );
-            return;
-        }
-    };
-    crate::println!(
-        "linux: relocated kernel image to {:#018x}",
-        kernel_loaded.physical_start() as usize,
-    );
-
-    let initrd_loaded = initrd_loaded.map(|(path, loaded)| (path.as_str(), loaded));
-
-    if linux_boot_and_start(
-        &kernel_loaded,
-        initrd_loaded,
-        &device_tree,
-        allocator,
-        command_line,
-        boot_hart,
-    )
-    .is_err()
-    {
-        return;
-    }
-}
-
-/// Copies one loaded kernel image into a low 2 MiB-aligned memory slot.
-///
-/// # Parameters
-///
-/// - `allocator`: Live page allocator reused for Linux boot allocations.
-/// - `kernel_loaded`: Loaded kernel image currently stored in high memory.
-fn relocate_linux_kernel(
-    allocator: &mut PageAllocator<'_>,
-    kernel_loaded: &LoadedFile,
-) -> Option<LoadedFile> {
-    let relocated_start = allocator
-        .allocate_aligned_pages_for_size(
-            EFI_MEMORY_TYPE::EfiBootServicesData,
-            kernel_loaded.size_bytes(),
-            KERNEL_ALIGNMENT,
-            AllocationDirection::Low,
-        )
-        .ok()?;
-
-    unsafe {
-        ptr::copy_nonoverlapping(
-            kernel_loaded.physical_start() as *const u8,
-            relocated_start as *mut u8,
-            kernel_loaded.size_bytes(),
-        );
-    }
-
-    allocator
-        .FreePages(
-            kernel_loaded.physical_start(),
-            kernel_loaded.page_count(),
-        )
-        .ok()?;
-
-    Some(LoadedFile::new(
-        relocated_start,
-        kernel_loaded.page_count(),
-        kernel_loaded.size_bytes(),
-    ))
 }
 
 /// Builds a page allocator from the live boot-time device tree.
@@ -644,49 +260,6 @@ unsafe fn enter_relocated_copy(
     }
 }
 
-/// Returns the Linux root-device command line for one virtio block device and partition.
-///
-/// # Parameters
-///
-/// - `block_device_index`: Zero-based virtio block-device index.
-/// - `partition_number`: One-based partition number selected for boot.
-fn root_command_line<'a>(
-    block_device_index: usize,
-    partition_number: u32,
-    buffer: &'a mut [u8; 24],
-) -> Option<&'a str> {
-    if block_device_index >= 26 {
-        return None;
-    }
-
-    let prefix = b"root=/dev/vda";
-    buffer[..prefix.len()].copy_from_slice(prefix);
-    // Replace the trailing drive letter so vda/vdb/... tracks the VirtIO disk index.
-    buffer[prefix.len() - 1] = b'a' + block_device_index as u8;
-
-    let mut digits = [0u8; 10];
-    let mut digit_count = 0usize;
-    let mut value = partition_number;
-    loop {
-        digits[digit_count] = b'0' + (value % 10) as u8;
-        digit_count += 1;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-
-    let mut index = 0usize;
-    while index < digit_count {
-        buffer[prefix.len() + index] = digits[digit_count - 1 - index];
-        index += 1;
-    }
-
-    Some(unsafe {
-        str::from_utf8_unchecked(&buffer[..prefix.len() + digit_count])
-    })
-}
-
 /// Empty descriptor value used for temporary EFI memory-map arrays.
 const EMPTY_MEMORY_DESCRIPTOR: EFI_MEMORY_DESCRIPTOR = EFI_MEMORY_DESCRIPTOR {
     Type: 0,
@@ -718,11 +291,11 @@ fn detect_partition_filesystem<D: BlockDevice>(
     device: &mut D,
     partition_start_lba: u64,
 ) -> DetectedFilesystem {
-    if FatVolume::new(device, partition_start_lba).is_ok() {
+    if crate::fat::FatVolume::new(device, partition_start_lba).is_ok() {
         return DetectedFilesystem::Fat;
     }
 
-    if Ext4Volume::new(device, partition_start_lba).is_ok() {
+    if crate::ext4::Ext4Volume::new(device, partition_start_lba).is_ok() {
         return DetectedFilesystem::Ext4;
     }
 
@@ -799,6 +372,12 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
                 DetectedFilesystem::Unknown => "unknown",
             };
 
+            let linux_filesystem = match filesystem {
+                DetectedFilesystem::Fat => LinuxBootFilesystem::Fat,
+                DetectedFilesystem::Ext4 => LinuxBootFilesystem::Ext4,
+                DetectedFilesystem::Unknown => LinuxBootFilesystem::Unknown,
+            };
+
             crate::println!(
                 "partition {}: start={}, size={}, label='{}', type='{}', fs='{}', bootflag={}",
                 partition_index,
@@ -811,10 +390,10 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
             );
 
             if bootable {
-                try_linux_boot_from_partition(
+                linux_try_boot_from_partition(
                     &mut driver,
                     partition,
-                    filesystem,
+                    linux_filesystem,
                     current_block_device_index,
                     partition_index,
                     boot_hart,
