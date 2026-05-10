@@ -5,9 +5,6 @@
 
 use crate::devicetree::{Fdt, MemoryRegion};
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
-use crate::put_decimal_u64;
-use crate::put_hex_usize;
-use crate::puts;
 
 /// Prints firmware diagnostics using the live device tree and memory subsystem.
 ///
@@ -21,13 +18,12 @@ pub fn print_diagnostics(
     device_tree: *const u8,
     entry_stack: usize,
 ) {
-    let _ = puts("entry: boot_hart=");
-    put_decimal_u64(boot_hart as u64);
-    let _ = puts(", device_tree=");
-    put_hex_usize(device_tree as usize);
-    let _ = puts(", sp=");
-    put_hex_usize(entry_stack);
-    let _ = puts("\n");
+    crate::println!(
+        "entry: boot_hart={}, device_tree={:#018x}, sp={:#018x}",
+        boot_hart,
+        device_tree as usize,
+        entry_stack,
+    );
 
     let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
@@ -36,7 +32,7 @@ pub fn print_diagnostics(
     let fdt = match unsafe { Fdt::from_ptr(device_tree) } {
         Ok(fdt) => fdt,
         Err(_) => {
-            let _ = puts("diagnostics: memory-map unavailable\n");
+            crate::println!("diagnostics: memory-map unavailable");
             return;
         }
     };
@@ -62,25 +58,23 @@ pub fn print_fdt_information(
 
     let mut index = 0usize;
     while index < memory_region_count {
-        let _ = puts("memory ");
-        put_decimal_u64((index + 1) as u64);
-        let _ = puts(": base=");
-        put_hex_usize(memory_regions[index].base as usize);
-        let _ = puts(", size=");
-        put_hex_usize(memory_regions[index].size as usize);
-        let _ = puts("\n");
+        crate::println!(
+            "memory {}: base={:#018x}, size={:#018x}",
+            index + 1,
+            memory_regions[index].base as usize,
+            memory_regions[index].size as usize,
+        );
         index += 1;
     }
 
     index = 0;
     while index < reserved_region_count {
-        let _ = puts("reserved ");
-        put_decimal_u64((index + 1) as u64);
-        let _ = puts(": base=");
-        put_hex_usize(reserved_regions[index].base as usize);
-        let _ = puts(", size=");
-        put_hex_usize(reserved_regions[index].size as usize);
-        let _ = puts("\n");
+        crate::println!(
+            "reserved {}: base={:#018x}, size={:#018x}",
+            index + 1,
+            reserved_regions[index].base as usize,
+            reserved_regions[index].size as usize,
+        );
         index += 1;
     }
 }
@@ -99,10 +93,15 @@ pub fn print_memory_map(
     reserved_regions: &mut [MemoryRegion],
     memory_map: &mut [EFI_MEMORY_DESCRIPTOR],
 ) {
-    let descriptor_count = match memory_map_from_fdt(fdt, memory_regions, reserved_regions, memory_map) {
+    let descriptor_count = match memory_map_from_fdt(
+        fdt,
+        memory_regions,
+        reserved_regions,
+        memory_map,
+    ) {
         Ok(descriptor_count) => descriptor_count,
         Err(_) => {
-            let _ = puts("diagnostics: efi-memory-map unavailable\n");
+            crate::println!("diagnostics: efi-memory-map unavailable");
             return;
         }
     };
@@ -111,17 +110,14 @@ pub fn print_memory_map(
     while index < descriptor_count {
         let descriptor = memory_map[index];
         let size_in_bytes = descriptor.NumberOfPages.saturating_mul(EFI_PAGE_SIZE);
-        let _ = puts("efi-memory ");
-        put_decimal_u64((index + 1) as u64);
-        let _ = puts(": type=");
-        let _ = puts(efi_memory_type_name(descriptor));
-        let _ = puts(", base=");
-        put_hex_usize(descriptor.PhysicalStart as usize);
-        let _ = puts(", size=");
-        put_hex_usize(size_in_bytes as usize);
-        let _ = puts(", attr=");
-        put_hex_usize(descriptor.Attribute as usize);
-        let _ = puts("\n");
+        crate::println!(
+            "efi-memory {}: type={}, base={:#018x}, size={:#018x}, attr={:#018x}",
+            index + 1,
+            efi_memory_type_name(descriptor),
+            descriptor.PhysicalStart as usize,
+            size_in_bytes as usize,
+            descriptor.Attribute as usize,
+        );
         index += 1;
     }
 }

@@ -8,9 +8,6 @@
 use crate::dtb::{Dtb, DtbError};
 use crate::filesystem::{FileInfoView, FileType, LoadedFile};
 use crate::memory::PageAllocator;
-use crate::put_decimal_u64;
-use crate::put_hex_usize;
-use crate::puts;
 use core::arch::asm;
 use core::mem::offset_of;
 
@@ -268,13 +265,12 @@ pub unsafe fn start(
 ) -> ! {
     let kernel_entry = kernel_image.physical_start() as usize;
 
-    let _ = puts("linux: start entry=");
-    put_hex_usize(kernel_entry);
-    let _ = puts(", boot_hart=");
-    put_decimal_u64(boot_hart as u64);
-    let _ = puts(", device_tree=");
-    put_hex_usize(updated_device_tree as usize);
-    let _ = puts("\n");
+    crate::println!(
+        "linux: start entry={:#018x}, boot_hart={}, device_tree={:#018x}",
+        kernel_entry,
+        boot_hart,
+        updated_device_tree as usize,
+    );
 
     unsafe {
         asm!(
@@ -332,30 +328,19 @@ fn parse_linux_boot_image_header(
 ///
 /// - `bytes`: Loaded kernel image bytes.
 fn dump_kernel_header(bytes: &[u8]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let _ = puts("linux: first 0x40 kernel bytes\n");
+    crate::println!("linux: first 0x40 kernel bytes");
 
     let limit = bytes.len().min(RISCV_LINUX_HEADER_SIZE);
     let mut index = 0usize;
     while index < limit {
-        let _ = puts("linux:   ");
-
-        let mut line = [b' '; 16 * 3];
-        let mut line_len = 0usize;
         let mut column = 0usize;
+        crate::print!("linux:   ");
         while column < 16 && index + column < limit {
             let value = bytes[index + column];
-            line[line_len] = HEX[(value >> 4) as usize];
-            line[line_len + 1] = HEX[(value & 0x0f) as usize];
-            line[line_len + 2] = b' ';
-            line_len += 3;
+            crate::print!("{:02x} ", value);
             column += 1;
         }
-
-        let text = unsafe { core::str::from_utf8_unchecked(&line[..line_len]) };
-        let _ = puts(text);
-        let _ = puts("\n");
+        crate::println!("");
         index += 16;
     }
 }

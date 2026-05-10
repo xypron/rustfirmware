@@ -29,6 +29,10 @@ pub mod dtb;
 pub mod devicetree;
 /// Firmware diagnostics output and reporting.
 pub mod diagnostics;
+/// Formatted console output helpers built on top of OpenSBI.
+pub mod print;
+/// OpenSBI constants and environment-call wrappers.
+pub mod sbi;
 /// EFI-style page allocator and memory map support.
 pub mod memory;
 
@@ -46,6 +50,7 @@ use gpt::GptPartitionTable;
 use linux::{boot as linux_boot, check_kernel_header, start as linux_start};
 use memory::{EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR, EFI_MEMORY_TYPE, PageAllocator};
 use partition::{PartitionEntry, PartitionTable};
+use sbi::{poweroff, poweroff_on_failure};
 use virtio::{qemu_virt_block_devices, BlockDevice};
 use virtio::VirtioBlockDriver;
 
@@ -60,20 +65,6 @@ unsafe extern "C" {
     static __heap_end: u8;
 }
 
-/// SBI extension ID for the debug console extension.
-const SBI_EXT_DBCN: usize = 0x4442_434e;
-/// SBI function ID for buffered debug console writes.
-const SBI_DBCN_CONSOLE_WRITE: usize = 0;
-/// SBI extension ID for the system reset extension.
-const SBI_EXT_SRST: usize = 0x5352_5354;
-/// SBI function ID for system reset requests.
-const SBI_SRST_SYSTEM_RESET: usize = 0;
-/// SRST reset type used to power off the machine.
-const SBI_SRST_RESET_TYPE_SHUTDOWN: usize = 0;
-/// SRST reset reason for a normal shutdown.
-const SBI_SRST_RESET_REASON_NONE: usize = 0;
-/// SRST reset reason for a firmware-detected failure.
-const SBI_SRST_RESET_REASON_SYSTEM_FAILURE: usize = 1;
 /// Build profile name injected by the Makefile for runtime diagnostics.
 const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
     Some(profile) => profile,
@@ -90,7 +81,7 @@ global_asm!(
     .globl _start
 _start:
     mv a2, sp
-    li sp, 0x80200000
+    lla sp, __stack_top
     tail rust_entry
 
     .globl relocated_entry
@@ -112,16 +103,6 @@ static mut DEVICE_TREE_PTR: usize = 0;
 #[unsafe(no_mangle)]
 /// Stack pointer observed on entry before switching to the firmware stack.
 static mut ENTRY_STACK_PTR: usize = 0;
-
-/// SBI return pair carrying an error code and one return value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-struct SbiRet {
-    /// SBI error code returned in register `a0`.
-    error: usize,
-    /// SBI result value returned in register `a1`.
-    value: usize,
-}
 
 /// Returns the hart identifier observed at firmware entry.
 ///
@@ -171,197 +152,18 @@ fn relocated_entry_offset() -> usize {
     core::ptr::addr_of!(relocated_entry) as usize
 }
 
-/// Performs one SBI environment call with the provided register arguments.
-///
-/// # Parameters
-///
-/// - `arg0`: Value loaded into register `a0` before the call.
-/// - `arg1`: Value loaded into register `a1` before the call.
-/// - `arg2`: Value loaded into register `a2` before the call.
-/// - `arg3`: Value loaded into register `a3` before the call.
-/// - `arg4`: Value loaded into register `a4` before the call.
-/// - `arg5`: Value loaded into register `a5` before the call.
-/// - `fid`: SBI function identifier loaded into register `a6`.
-/// - `eid`: SBI extension identifier loaded into register `a7`.
-fn ecall(
-    arg0: usize,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-    fid: usize,
-    eid: usize,
-) -> SbiRet {
-    let error;
-    let value;
-
-    unsafe {
-        asm!(
-            "ecall",
-            inlateout("a0") arg0 => error,
-            inlateout("a1") arg1 => value,
-            in("a2") arg2,
-            in("a3") arg3,
-            in("a4") arg4,
-            in("a5") arg5,
-            in("a6") fid,
-            in("a7") eid,
-            options(nostack)
-        );
-    }
-
-    SbiRet { error, value }
-}
-
-/// Writes one string slice through the SBI debug console extension.
-///
-/// # Parameters
-///
-/// - `message`: Text buffer passed to the SBI DBCN console write call.
-pub(crate) fn puts(message: &str) -> SbiRet {
-    ecall(
-        message.len(),
-        message.as_ptr() as usize,
-        0,
-        0,
-        0,
-        0,
-        SBI_DBCN_CONSOLE_WRITE,
-        SBI_EXT_DBCN,
-    )
-}
-
-/// Stops forward progress by repeatedly waiting for interrupts.
-///
-/// # Parameters
-///
-/// This function does not accept parameters.
-fn halt() -> ! {
-    loop {
-        unsafe {
-            asm!("wfi", options(nomem, nostack, preserves_flags));
-        }
-    }
-}
-
-/// Requests an SBI system reset and halts if the call returns.
-///
-/// # Parameters
-///
-/// - `reset_type`: SBI reset type passed to the SRST extension.
-/// - `reset_reason`: SBI reset reason passed to the SRST extension.
-fn system_reset(reset_type: usize, reset_reason: usize) -> ! {
-    let _ = ecall(
-        reset_type,
-        reset_reason,
-        0,
-        0,
-        0,
-        0,
-        SBI_SRST_SYSTEM_RESET,
-        SBI_EXT_SRST,
-    );
-
-    halt()
-}
-
-/// Powers off the machine through the SBI system reset extension.
-///
-/// # Parameters
-///
-/// This function does not accept parameters.
-fn poweroff() -> ! {
-    system_reset(SBI_SRST_RESET_TYPE_SHUTDOWN, SBI_SRST_RESET_REASON_NONE)
-}
-
 /// Prints the firmware name, version, and build profile.
 ///
 /// # Parameters
 ///
 /// This function does not accept parameters.
-fn greet() -> SbiRet {
-    let _ = puts(env!("CARGO_PKG_NAME"));
-    let _ = puts(" ");
-    let _ = puts(env!("CARGO_PKG_VERSION"));
-    let _ = puts(" (");
-    let _ = puts(BUILD_PROFILE);
-    puts(")\n")
-}
-
-/// Prints one `usize` value as a fixed-width hexadecimal number.
-///
-/// # Parameters
-///
-/// - `value`: Machine-sized integer to format and emit.
-pub(crate) fn put_hex_usize(value: usize) {
-    /// Hex digit lookup table used for manual number formatting.
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-    let mut buffer = [0u8; 2 + (core::mem::size_of::<usize>() * 2)];
-    let mut shift = (core::mem::size_of::<usize>() * 8) as isize - 4;
-
-    buffer[0] = b'0';
-    buffer[1] = b'x';
-
-    let mut index = 2;
-    while shift >= 0 {
-        let nibble = ((value >> shift as usize) & 0xf) as usize;
-        buffer[index] = HEX_DIGITS[nibble];
-        index += 1;
-        shift -= 4;
-    }
-
-    let text = unsafe { str::from_utf8_unchecked(&buffer) };
-    let _ = puts(text);
-}
-
-/// Prints one decimal digit without additional formatting.
-///
-/// # Parameters
-///
-/// - `value`: Single digit value to emit.
-pub(crate) fn put_small_decimal(value: usize) {
-    let digit = [b'0' + value as u8];
-    let text = unsafe { str::from_utf8_unchecked(&digit) };
-    let _ = puts(text);
-}
-
-/// Prints one `u64` value in decimal form.
-///
-/// # Parameters
-///
-/// - `value`: Unsigned integer value to format and emit.
-pub(crate) fn put_decimal_u64(mut value: u64) {
-    let mut buffer = [0u8; 20];
-    let mut index = buffer.len();
-
-    if value == 0 {
-        let _ = puts("0");
-        return;
-    }
-
-    while value != 0 {
-        index -= 1;
-        buffer[index] = b'0' + (value % 10) as u8;
-        value /= 10;
-    }
-
-    let text = unsafe { str::from_utf8_unchecked(&buffer[index..]) };
-    let _ = puts(text);
-}
-
-/// Prints one boolean value as `true` or `false`.
-///
-/// # Parameters
-///
-/// - `value`: Boolean value to emit.
-fn put_bool(value: bool) {
-    if value {
-        let _ = puts("true");
-    } else {
-        let _ = puts("false");
-    }
+fn greet() {
+    crate::println!(
+        "{} {} ({})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        BUILD_PROFILE,
+    );
 }
 
 /// Candidate kernel paths searched in order on boot-flagged partitions.
@@ -377,14 +179,13 @@ const INITRD_CANDIDATE_PATHS: [&str; 2] = ["/boot/initrd.img", "/initrd.img"];
 /// - `path`: Absolute path of the loaded file.
 /// - `loaded_file`: Loaded file metadata including physical address and size.
 fn print_loaded_file(prefix: &str, path: &str, loaded_file: &LoadedFile) {
-    let _ = puts(prefix);
-    let _ = puts(": loaded '");
-    let _ = puts(path);
-    let _ = puts("', size=");
-    put_decimal_u64(loaded_file.size_bytes() as u64);
-    let _ = puts(" @ ");
-    put_hex_usize(loaded_file.physical_start() as usize);
-    let _ = puts("\n");
+    crate::println!(
+        "{}: loaded '{}', size={} @ {:#018x}",
+        prefix,
+        path,
+        loaded_file.size_bytes(),
+        loaded_file.physical_start() as usize,
+    );
 }
 
 /// Tries the Linux boot method on one boot-flagged partition.
@@ -469,7 +270,7 @@ fn try_linux_boot_from_fat_volume<D: BlockDevice>(
     ) {
         Some(allocator) => allocator,
         None => {
-            let _ = puts("linux: page allocator unavailable\n");
+            crate::println!("linux: page allocator unavailable");
             return;
         }
     };
@@ -532,7 +333,7 @@ fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
     ) {
         Some(allocator) => allocator,
         None => {
-            let _ = puts("linux: page allocator unavailable\n");
+            crate::println!("linux: page allocator unavailable");
             return;
         }
     };
@@ -596,14 +397,14 @@ fn boot_loaded_linux_artifacts(
         partition_number,
         &mut command_line_buffer,
     ) else {
-        let _ = puts("linux: unsupported root device index\n");
+        crate::println!("linux: unsupported root device index");
         return;
     };
 
     let device_tree = match Dtb::from_ptr(device_tree_ptr) {
         Ok(device_tree) => device_tree,
         Err(_) => {
-            let _ = puts("linux: invalid device-tree pointer\n");
+            crate::println!("linux: invalid device-tree pointer");
             return;
         }
     };
@@ -611,14 +412,16 @@ fn boot_loaded_linux_artifacts(
 
     match check_kernel_header(kernel_loaded) {
         Ok(()) => {
-            let _ = puts("linux: kernel object ");
-            let _ = puts(kernel_path);
-            let _ = puts(" matches RISC-V boot image header\n");
+            crate::println!(
+                "linux: kernel object {} matches RISC-V boot image header",
+                kernel_path,
+            );
         }
         Err(_) => {
-            let _ = puts("linux: kernel object ");
-            let _ = puts(kernel_path);
-            let _ = puts(" does not match RISC-V boot image header\n");
+            crate::println!(
+                "linux: kernel object {} does not match RISC-V boot image header",
+                kernel_path,
+            );
             return;
         }
     }
@@ -646,28 +449,26 @@ fn boot_loaded_linux_artifacts(
             ) {
                 Ok(()) => {}
                 Err(_) => {
-                    let _ = puts("linux: failed to update cloned device-tree\n");
+                    crate::println!("linux: failed to update cloned device-tree");
                     return;
                 }
             }
-            let _ = puts("linux: boot request invoked ");
-            let _ = puts(kernel_path);
-            let _ = puts("=");
-            put_decimal_u64(request.kernel_size_bytes() as u64);
-            let _ = puts(" @ ");
-            put_hex_usize(kernel_loaded.physical_start() as usize);
+            crate::print!(
+                "linux: boot request invoked {}={} @ {:#018x}",
+                kernel_path,
+                request.kernel_size_bytes(),
+                kernel_loaded.physical_start() as usize,
+            );
             if let Some((initrd_path, initrd_file)) = initrd_loaded {
-                let _ = puts(", ");
-                let _ = puts(initrd_path);
-                let _ = puts("=");
-                put_decimal_u64(initrd_file.size_bytes() as u64);
-                let _ = puts(" @ ");
-                put_hex_usize(initrd_file.physical_start() as usize);
+                crate::print!(
+                    ", {}={} @ {:#018x}",
+                    initrd_path,
+                    initrd_file.size_bytes(),
+                    initrd_file.physical_start() as usize,
+                );
             }
-            let _ = puts(", cmdline='");
-            let _ = puts(command_line);
-            let _ = puts("'\n");
-            let _ = puts("linux: transferring control to kernel\n");
+            crate::println!(", cmdline='{}'", command_line);
+            crate::println!("linux: transferring control to kernel");
 
             unsafe {
                 linux_start(
@@ -678,7 +479,7 @@ fn boot_loaded_linux_artifacts(
             }
         }
         Err(_) => {
-            let _ = puts("linux: boot request rejected\n");
+            crate::println!("linux: boot request rejected");
         }
     }
 }
@@ -822,9 +623,10 @@ fn try_relocate_firmware(
         );
     }
 
-    let _ = puts("rustfimware: relocating image to ");
-    put_hex_usize(relocated_base as usize);
-    let _ = puts("\n");
+    crate::println!(
+        "rustfimware: relocating image to {:#018x}",
+        relocated_base as usize,
+    );
 
     unsafe {
         enter_relocated_copy(
@@ -958,11 +760,11 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
 
     for probe in qemu_virt_block_devices() {
         found_any = true;
-        let _ = puts("virtio: block device at slot ");
-        put_small_decimal(probe.slot);
-        let _ = puts(" base ");
-        put_hex_usize(probe.device.base_address());
-        let _ = puts("\n");
+        crate::println!(
+            "virtio: block device at slot {} base {:#018x}",
+            probe.slot,
+            probe.device.base_address(),
+        );
 
         let current_block_device_index = block_device_index;
         block_device_index += 1;
@@ -970,7 +772,7 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
         let mut driver = match unsafe { VirtioBlockDriver::new(probe.device) } {
             Ok(driver) => driver,
             Err(_) => {
-                let _ = puts("gpt: virtio block init failed\n");
+                crate::println!("gpt: virtio block init failed");
                 continue;
             }
         };
@@ -978,7 +780,7 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
         let mut partitions = match GptPartitionTable::new(&mut driver) {
             Some(partitions) => partitions,
             None => {
-                let _ = puts("gpt: no primary GPT header\n");
+                crate::println!("gpt: no primary GPT header");
                 continue;
             }
         };
@@ -1009,31 +811,22 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
                 partition_start_lba,
             );
 
-            let _ = puts("partition ");
-            put_decimal_u64(partition_index as u64);
-            let _ = puts(": start=");
-            put_decimal_u64(partition_start_lba);
-            let _ = puts(", size=");
-            put_decimal_u64(partition.sector_count());
-            let _ = puts(", label='");
-            let _ = puts(partition.label(&mut label));
-            let _ = puts("', type='");
-            let _ = puts(partition.partition_type(&mut partition_type));
-            let _ = puts("', fs='");
-            match filesystem {
-                DetectedFilesystem::Fat => {
-                    let _ = puts("fat");
-                }
-                DetectedFilesystem::Ext4 => {
-                    let _ = puts("ext4");
-                }
-                DetectedFilesystem::Unknown => {
-                    let _ = puts("unknown");
-                }
-            }
-            let _ = puts("', bootflag=");
-            put_bool(bootable);
-            let _ = puts("\n");
+            let filesystem_name = match filesystem {
+                DetectedFilesystem::Fat => "fat",
+                DetectedFilesystem::Ext4 => "ext4",
+                DetectedFilesystem::Unknown => "unknown",
+            };
+
+            crate::println!(
+                "partition {}: start={}, size={}, label='{}', type='{}', fs='{}', bootflag={}",
+                partition_index,
+                partition_start_lba,
+                partition.sector_count(),
+                partition.label(&mut label),
+                partition.partition_type(&mut partition_type),
+                filesystem_name,
+                bootable,
+            );
 
             if bootable {
                 try_linux_boot_from_partition(
@@ -1052,7 +845,7 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
             partitions = match GptPartitionTable::new(&mut driver) {
                 Some(partitions) => partitions,
                 None => {
-                    let _ = puts("gpt: failed to reopen partition table\n");
+                    crate::println!("gpt: failed to reopen partition table");
                     break;
                 }
             };
@@ -1060,7 +853,7 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
     }
 
     if !found_any {
-        let _ = puts("virtio: no block device found on qemu virt mmio\n");
+        crate::println!("virtio: no block device found on qemu virt mmio");
     }
 }
 
@@ -1112,13 +905,15 @@ fn run_firmware(
         if let Some(()) = try_relocate_firmware(boot_hart, device_tree, entry_stack) {
             unreachable!();
         }
-        let _ = puts("rustfimware: relocation unavailable, continuing in-place\n");
+        crate::println!(
+            "rustfimware: relocation unavailable, continuing in-place"
+        );
     }
 
-    let _ = greet();
+    greet();
     print_diagnostics(boot_hart, device_tree, entry_stack);
     probe_virtio(boot_hart, device_tree);
-    let _ = puts("rustfimware: poweroff via sbi srst\n");
+    crate::println!("rustfimware: poweroff via sbi srst");
     poweroff()
 }
 
@@ -1129,6 +924,6 @@ fn run_firmware(
 ///
 /// - `_info`: Panic metadata supplied by the Rust core runtime.
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    let _ = puts("rustfimware: panic\n");
-    system_reset(SBI_SRST_RESET_TYPE_SHUTDOWN, SBI_SRST_RESET_REASON_SYSTEM_FAILURE)
+    crate::println!("rustfimware: panic");
+    poweroff_on_failure()
 }
