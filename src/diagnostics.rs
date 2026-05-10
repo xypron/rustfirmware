@@ -14,16 +14,34 @@ use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 pub fn print_rustfw_banner() {
     crate::print::println(
         concat!(
-            r"                 _   _______        __",
+            r"                 _   _______        __", "\n",
+            r"  _ __ _   _ ___| |_|  ___\ \      / /", "\n",
+            r" | '__| | | / __| __| |_   \ \ /\ / /", "\n",
+            r" | |  | |_| \__ \ |_|  _|   \ V  V /", "\n",
+            r" |_|   \__,_|___/\__|_|      \_/\_/", "\n"
+        ),
+        &[],
+    );
+}
+
+/// Prints the Linux handoff ASCII-art banner before jumping to the kernel.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
+pub fn banner_handoff() {
+    crate::print::println(
+        concat!(
             "\n",
-            r"  _ __ _   _ ___| |_|  ___\ \      / /",
-            "\n",
-            r" | '__| | | / __| __| |_   \ \ /\ / /",
-            "\n",
-            r" | |  | |_| \__ \ |_|  _|   \ V  V /",
-            "\n",
-            r" |_|   \__,_|___/\__|_|      \_/\_/",
-            "\n"
+            r" /||\", "\n",
+            r"| O.O|", "\n",
+            r" \_=/", "\n",
+            r" | |", "\n",
+            r" |\ \", "\n",
+            r" | \_\_____________", "\n",
+            r" | |    \      __ /", "\n",
+            r" | |_    \___ /  \ ", "\n",
+            r" |___|        \__/", "\n",
         ),
         &[],
     );
@@ -35,17 +53,11 @@ pub fn print_rustfw_banner() {
 ///
 /// - `boot_hart`: Original hart identifier received in register `a0`.
 /// - `device_tree`: Original device-tree pointer received in register `a1`.
-/// - `entry_stack`: Original stack pointer value observed before switching stacks.
-pub fn print_diagnostics(
-    boot_hart: usize,
-    device_tree: *const u8,
-    entry_stack: usize,
-) {
+pub fn print_diagnostics(boot_hart: usize, device_tree: *const u8) {
     crate::println!(
-        "entry: boot_hart={}, device_tree={:#018x}, sp={:#018x}",
+        "entry: boot_hart={}, device_tree={:#018x}",
         boot_hart,
         device_tree as usize,
-        entry_stack,
     );
 }
 

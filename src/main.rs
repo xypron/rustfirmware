@@ -429,7 +429,7 @@ fn run_firmware(
     }
 
     greet();
-    print_diagnostics(boot_hart, device_tree, entry_stack);
+    print_diagnostics(boot_hart, device_tree);
     probe_virtio(boot_hart, device_tree);
     crate::println!("rustfimware: poweroff via sbi srst");
     poweroff()

@@ -548,6 +548,7 @@ pub fn boot_and_start<'a>(
     }
 
     crate::println!("linux: transferring control to kernel");
+    crate::diagnostics::banner_handoff();
 
     unsafe {
         start(kernel_image, boot_hart, request.device_tree().pointer());
@@ -597,13 +598,6 @@ pub unsafe fn start(
     updated_device_tree: *const u8,
 ) -> ! {
     let kernel_entry = kernel_image.physical_start() as usize;
-
-    crate::println!(
-        "linux: entry={:#018x}, boot_hart={}, device_tree={:#018x}",
-        kernel_entry,
-        boot_hart,
-        updated_device_tree as usize,
-    );
 
     unsafe {
         asm!(
