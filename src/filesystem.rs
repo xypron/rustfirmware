@@ -208,6 +208,35 @@ pub trait FileSystem {
     ) -> Result<Self::File<'file>, Self::Error>;
 }
 
+/// Loads the first successfully opened file from one filesystem.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted filesystem used to open candidate paths.
+/// - `candidate_path`: Returns the next candidate path for one index.
+/// - `allocator`: Page allocator used to reserve the destination pages.
+/// - `filesystem_name`: Filesystem label used in the load log.
+pub fn load_first_file<F: FileSystem, P: AsRef<str> + Copy>(
+    volume: &mut F,
+    candidate_path: fn(usize) -> Option<P>,
+    allocator: &mut PageAllocator<'_>,
+    filesystem_name: &str,
+) -> Option<(P, LoadedFile)> {
+    let mut index = 0usize;
+    while let Some(path) = candidate_path(index) {
+        let path_text = path.as_ref();
+        if let Ok(mut file) = volume.open(path_text) {
+            if let Ok(loaded) = file.load(allocator) {
+                print_loaded_file(filesystem_name, path_text, &loaded);
+                return Some((path, loaded));
+            }
+        }
+        index += 1;
+    }
+
+    None
+}
+
 /// Prints one loaded file path plus size with a filesystem prefix.
 ///
 /// # Parameters

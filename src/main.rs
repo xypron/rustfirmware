@@ -45,7 +45,7 @@ use diagnostics::print_diagnostics;
 use dtb::Dtb;
 use ext4::Ext4Volume;
 use fat::FatVolume;
-use filesystem::{print_loaded_file, FileHandle, FileSystem, LoadedFile};
+use filesystem::{load_first_file, LoadedFile};
 use gpt::GptPartitionTable;
 use linux::{boot_and_start as linux_boot_and_start, check_kernel_header};
 use memory::{
@@ -203,6 +203,17 @@ impl BootPath {
     }
 }
 
+impl AsRef<str> for BootPath {
+    /// Returns the stored path as a string slice.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// Returns one kernel candidate path by search order.
 ///
 /// # Parameters
@@ -316,17 +327,17 @@ fn try_linux_boot_from_fat_volume<D: BlockDevice>(
         }
     };
 
-    let Some((kernel_path, kernel_loaded)) = load_first_fat_file(
+    let Some((kernel_path, kernel_loaded)) = load_first_file(
         volume,
-            kernel_candidate_path,
+        kernel_candidate_path,
         &mut allocator,
         filesystem_name,
     ) else {
         return;
     };
-    let initrd_loaded = load_first_fat_file(
+    let initrd_loaded = load_first_file(
         volume,
-            initrd_candidate_path,
+        initrd_candidate_path,
         &mut allocator,
         filesystem_name,
     );
@@ -379,7 +390,7 @@ fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
         }
     };
 
-    let Some((kernel_path, kernel_loaded)) = load_first_ext4_file(
+    let Some((kernel_path, kernel_loaded)) = load_first_file(
         volume,
         kernel_candidate_path,
         &mut allocator,
@@ -387,7 +398,7 @@ fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
     ) else {
         return;
     };
-    let initrd_loaded = load_first_ext4_file(
+    let initrd_loaded = load_first_file(
         volume,
         initrd_candidate_path,
         &mut allocator,
@@ -490,64 +501,6 @@ fn boot_loaded_linux_artifacts(
     {
         return;
     }
-}
-
-/// Loads the first successfully opened file from one FAT volume.
-///
-/// # Parameters
-///
-/// - `volume`: Mounted FAT filesystem used to open candidate paths.
-/// - `candidate_path`: Returns the next candidate path for one index.
-/// - `allocator`: Page allocator used to reserve the destination pages.
-/// - `filesystem_name`: Filesystem label used in the load log.
-fn load_first_fat_file<'a, D: BlockDevice>(
-    volume: &mut FatVolume<'_, D>,
-    candidate_path: fn(usize) -> Option<BootPath>,
-    allocator: &mut PageAllocator<'_>,
-    filesystem_name: &str,
-) -> Option<(BootPath, LoadedFile)> {
-    let mut index = 0usize;
-    while let Some(path) = candidate_path(index) {
-        let path_text = path.as_str();
-        if let Ok(mut file) = volume.open(path_text) {
-            if let Ok(loaded) = file.load(allocator) {
-                print_loaded_file(filesystem_name, path_text, &loaded);
-                return Some((path, loaded));
-            }
-        }
-        index += 1;
-    }
-
-    None
-}
-
-/// Loads the first successfully opened file from one ext4 volume.
-///
-/// # Parameters
-///
-/// - `volume`: Mounted ext4 filesystem used to open candidate paths.
-/// - `candidate_path`: Returns the next candidate path for one index.
-/// - `allocator`: Page allocator used to reserve the destination pages.
-/// - `filesystem_name`: Filesystem label used in the load log.
-fn load_first_ext4_file<'a, D: BlockDevice>(
-    volume: &mut Ext4Volume<'_, D>,
-    candidate_path: fn(usize) -> Option<BootPath>,
-    allocator: &mut PageAllocator<'_>,
-    filesystem_name: &str,
-) -> Option<(BootPath, LoadedFile)> {
-    let mut index = 0usize;
-    while let Some(path) = candidate_path(index) {
-        let path_text = path.as_str();
-        if let Ok(mut file) = volume.open(path_text) {
-            if let Ok(loaded) = file.load(allocator) {
-                print_loaded_file(filesystem_name, path_text, &loaded);
-                return Some((path, loaded));
-            }
-        }
-        index += 1;
-    }
-
-    None
 }
 
 /// Copies one loaded kernel image into a low 2 MiB-aligned memory slot.
