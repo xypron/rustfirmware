@@ -47,7 +47,18 @@ pub fn print_diagnostics(
         device_tree as usize,
         entry_stack,
     );
+}
 
+/// Prints the verbose memory layout derived from the live device tree.
+///
+/// This helper is intentionally separate from `print_diagnostics()` so normal
+/// boot output stays compact while the detailed memory view remains available
+/// for future debugging.
+///
+/// # Parameters
+///
+/// - `device_tree`: Original device-tree pointer received in register `a1`.
+pub fn print_memory_layout(device_tree: *const u8) {
     let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
@@ -55,13 +66,41 @@ pub fn print_diagnostics(
     let fdt = match unsafe { Fdt::from_ptr(device_tree) } {
         Ok(fdt) => fdt,
         Err(_) => {
-            crate::println!("diagnostics: memory-map unavailable");
+            crate::println!("memory layout: memory-map unavailable");
             return;
         }
     };
 
     print_fdt_information(&fdt, &mut regions, &mut reserved);
     print_memory_map(&fdt, &mut regions, &mut reserved, &mut memory_map);
+}
+
+/// Prints the first `0x40` bytes of one byte slice for debugging.
+///
+/// This helper is intentionally separate from normal boot diagnostics so the
+/// byte dump remains available for future debugging without appearing in normal
+/// user-facing output.
+///
+/// # Parameters
+///
+/// - `label`: Short label printed before the byte dump.
+/// - `bytes`: Byte slice to inspect.
+pub fn print_byte_prefix(label: &str, bytes: &[u8]) {
+    crate::println!("{}: first 0x40 bytes", label);
+
+    let limit = bytes.len().min(0x40);
+    let mut index = 0usize;
+    while index < limit {
+        let mut column = 0usize;
+        crate::print!("{}:   ", label);
+        while column < 16 && index + column < limit {
+            let value = bytes[index + column];
+            crate::print!("{:02x} ", value);
+            column += 1;
+        }
+        crate::println!("");
+        index += 16;
+    }
 }
 
 /// Prints memory and reservation ranges decoded directly from the FDT.

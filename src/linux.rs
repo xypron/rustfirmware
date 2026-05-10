@@ -233,7 +233,6 @@ pub fn check_kernel_header(
     kernel_image: &LoadedFile,
 ) -> Result<(), LinuxBootError> {
     let bytes = kernel_image.bytes();
-    dump_kernel_header(bytes);
 
     let header = parse_linux_boot_image_header(bytes)?;
 
@@ -266,7 +265,7 @@ pub unsafe fn start(
     let kernel_entry = kernel_image.physical_start() as usize;
 
     crate::println!(
-        "linux: start entry={:#018x}, boot_hart={}, device_tree={:#018x}",
+        "linux: entry={:#018x}, boot_hart={}, device_tree={:#018x}",
         kernel_entry,
         boot_hart,
         updated_device_tree as usize,
@@ -320,29 +319,6 @@ fn parse_linux_boot_image_header(
         res3: read_le_u32(bytes, offset_of!(LinuxBootImageHeader, res3))
             .ok_or(LinuxBootError::KernelImageTooSmall)?,
     })
-}
-
-/// Dumps the first 0x40 bytes of the loaded kernel image to the debug console.
-///
-/// # Parameters
-///
-/// - `bytes`: Loaded kernel image bytes.
-fn dump_kernel_header(bytes: &[u8]) {
-    crate::println!("linux: first 0x40 kernel bytes");
-
-    let limit = bytes.len().min(RISCV_LINUX_HEADER_SIZE);
-    let mut index = 0usize;
-    while index < limit {
-        let mut column = 0usize;
-        crate::print!("linux:   ");
-        while column < 16 && index + column < limit {
-            let value = bytes[index + column];
-            crate::print!("{:02x} ", value);
-            column += 1;
-        }
-        crate::println!("");
-        index += 16;
-    }
 }
 
 /// Reads one little-endian `u32` from `bytes`.
