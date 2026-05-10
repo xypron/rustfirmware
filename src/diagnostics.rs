@@ -6,6 +6,29 @@
 use crate::devicetree::{Fdt, MemoryRegion};
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 
+/// Prints the RustFW ASCII-art banner after relocation.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
+pub fn print_rustfw_banner() {
+    crate::print::println(
+        concat!(
+            r"                 _   _______        __",
+            "\n",
+            r"  _ __ _   _ ___| |_|  ___\ \      / /",
+            "\n",
+            r" | '__| | | / __| __| |_   \ \ /\ / /",
+            "\n",
+            r" | |  | |_| \__ \ |_|  _|   \ V  V /",
+            "\n",
+            r" |_|   \__,_|___/\__|_|      \_/\_/",
+            "\n"
+        ),
+        &[],
+    );
+}
+
 /// Prints firmware diagnostics using the live device tree and memory subsystem.
 ///
 /// # Parameters

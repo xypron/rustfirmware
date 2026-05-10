@@ -910,6 +910,10 @@ fn run_firmware(
         );
     }
 
+    if firmware_runtime_base() != PRIMARY_FIRMWARE_LOAD_ADDRESS {
+        diagnostics::print_rustfw_banner();
+    }
+
     greet();
     print_diagnostics(boot_hart, device_tree, entry_stack);
     probe_virtio(boot_hart, device_tree);
