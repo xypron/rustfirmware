@@ -194,16 +194,12 @@ impl<'volume, 'device, D: BlockDevice> FileHandle
         &mut self,
         allocator: &mut PageAllocator<'_>,
     ) -> Result<LoadedFile, FatError> {
-        self.load_into_pages(
-            allocator,
-            EFI_ALLOCATE_TYPE::AllocateAnyPages,
-            0,
-        )
+        self.load_into_allocated_pages(allocator)
     }
 
     /// Loads the file into page-aligned EFI-style memory.
     ///
-    /// The allocation is performed as `EfiLoaderData` and always begins at the
+    /// The allocation is performed as `EfiBootServicesData` and always begins at the
     /// start of a 4 KiB page.
     ///
     /// # Parameters
@@ -223,6 +219,46 @@ impl<'volume, 'device, D: BlockDevice> FileHandle
 }
 
 impl<'volume, 'device, D: BlockDevice> FatFile<'volume, 'device, D> {
+    /// Loads the resolved regular file into allocator-chosen EFI-style pages.
+    ///
+    /// # Parameters
+    ///
+    /// - `allocator`: Page allocator used to reserve the destination pages.
+    fn load_into_allocated_pages(
+        &mut self,
+        allocator: &mut PageAllocator<'_>,
+    ) -> Result<LoadedFile, FatError> {
+        if self.entry.is_directory() {
+            return Err(FatError::IsDirectory);
+        }
+
+        let size_bytes = self.entry.file_size as usize;
+        let page_count = max(1, file_size_to_page_count(self.entry.file_size)?);
+        let physical_start = allocator.allocate_pages_for_size(
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+            size_bytes,
+        )?;
+
+        let allocation_size = page_count * EFI_PAGE_SIZE as usize;
+        let buffer = unsafe {
+            slice::from_raw_parts_mut(
+                physical_start as *mut u8,
+                allocation_size,
+            )
+        };
+        unsafe {
+            ptr::write_bytes(buffer.as_mut_ptr(), 0, buffer.len());
+        }
+
+        self.volume.read_file_contents(
+            self.entry.first_cluster,
+            self.entry.file_size,
+            &mut buffer[..size_bytes],
+        )?;
+
+        Ok(LoadedFile::new(physical_start, page_count, size_bytes))
+    }
+
     fn load_into_pages(
         &mut self,
         allocator: &mut PageAllocator<'_>,
@@ -237,7 +273,7 @@ impl<'volume, 'device, D: BlockDevice> FatFile<'volume, 'device, D> {
         let mut physical_start = requested_start;
         allocator.AllocatePages(
             allocation_type,
-            EFI_MEMORY_TYPE::EfiLoaderData,
+            EFI_MEMORY_TYPE::EfiBootServicesData,
             page_count,
             &mut physical_start,
         )?;

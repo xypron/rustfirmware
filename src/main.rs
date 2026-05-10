@@ -45,10 +45,13 @@ use diagnostics::print_diagnostics;
 use dtb::Dtb;
 use ext4::Ext4Volume;
 use fat::FatVolume;
-use filesystem::{FileHandle, FileInfo, FileSystem, FileType, LoadedFile};
+use filesystem::{print_loaded_file, FileHandle, FileSystem, LoadedFile};
 use gpt::GptPartitionTable;
-use linux::{boot as linux_boot, check_kernel_header, start as linux_start};
-use memory::{EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR, EFI_MEMORY_TYPE, PageAllocator};
+use linux::{boot_and_start as linux_boot_and_start, check_kernel_header};
+use memory::{
+    AllocationDirection, EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR,
+    EFI_MEMORY_TYPE, PageAllocator,
+};
 use partition::{PartitionEntry, PartitionTable};
 use sbi::{poweroff, poweroff_on_failure};
 use virtio::{qemu_virt_block_devices, BlockDevice};
@@ -72,8 +75,8 @@ const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
 };
 /// OpenSBI loads the primary firmware image at this physical address on QEMU virt.
 const PRIMARY_FIRMWARE_LOAD_ADDRESS: usize = 0x8020_0000;
-/// Linux is loaded at the conventional physical start address on QEMU virt.
-const KERNEL_LOAD_ADDRESS: usize = 0x8020_0000;
+/// RISC-V Linux kernels must be loaded at a 2 MiB-aligned address.
+const KERNEL_ALIGNMENT: u64 = 2 * 1024 * 1024;
 
 global_asm!(
     r#"
@@ -166,26 +169,64 @@ fn greet() {
     );
 }
 
-/// Candidate kernel paths searched in order on boot-flagged partitions.
-const KERNEL_CANDIDATE_PATHS: [&str; 2] = ["/boot/vmlinuz", "/vmlinuz"];
-/// Candidate initrd paths searched in order on boot-flagged partitions.
-const INITRD_CANDIDATE_PATHS: [&str; 2] = ["/boot/initrd.img", "/initrd.img"];
+/// Fixed-capacity owned boot path stored without external pointers.
+#[derive(Clone, Copy)]
+struct BootPath {
+    /// UTF-8 bytes for the path text.
+    bytes: [u8; 16],
+    /// Number of initialized bytes in `bytes`.
+    len: usize,
+}
 
-/// Prints one loaded file path plus size with a filesystem prefix.
+impl BootPath {
+    /// Builds one boot path by copying the provided byte slice.
+    ///
+    /// # Parameters
+    ///
+    /// - `bytes`: UTF-8 path bytes to store inline.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > 16 {
+            return None;
+        }
+
+        let mut path_bytes = [0u8; 16];
+        path_bytes[..bytes.len()].copy_from_slice(bytes);
+        Some(Self {
+            bytes: path_bytes,
+            len: bytes.len(),
+        })
+    }
+
+    /// Returns the stored path as a UTF-8 string slice.
+    fn as_str(&self) -> &str {
+        unsafe { str::from_utf8_unchecked(&self.bytes[..self.len]) }
+    }
+}
+
+/// Returns one kernel candidate path by search order.
 ///
 /// # Parameters
 ///
-/// - `prefix`: Filesystem label shown before the file path.
-/// - `path`: Absolute path of the loaded file.
-/// - `loaded_file`: Loaded file metadata including physical address and size.
-fn print_loaded_file(prefix: &str, path: &str, loaded_file: &LoadedFile) {
-    crate::println!(
-        "{}: loaded '{}', size={} @ {:#018x}",
-        prefix,
-        path,
-        loaded_file.size_bytes(),
-        loaded_file.physical_start() as usize,
-    );
+/// - `index`: Zero-based candidate index.
+fn kernel_candidate_path(index: usize) -> Option<BootPath> {
+    match index {
+        0 => BootPath::from_bytes(b"/boot/vmlinuz"),
+        1 => BootPath::from_bytes(b"/vmlinuz"),
+        _ => None,
+    }
+}
+
+/// Returns one initrd candidate path by search order.
+///
+/// # Parameters
+///
+/// - `index`: Zero-based candidate index.
+fn initrd_candidate_path(index: usize) -> Option<BootPath> {
+    match index {
+        0 => BootPath::from_bytes(b"/boot/initrd.img"),
+        1 => BootPath::from_bytes(b"/initrd.img"),
+        _ => None,
+    }
 }
 
 /// Tries the Linux boot method on one boot-flagged partition.
@@ -275,27 +316,27 @@ fn try_linux_boot_from_fat_volume<D: BlockDevice>(
         }
     };
 
-    let Some((kernel_path, kernel_loaded)) = load_first_fat_file_at(
+    let Some((kernel_path, kernel_loaded)) = load_first_fat_file(
         volume,
-        &KERNEL_CANDIDATE_PATHS,
+            kernel_candidate_path,
         &mut allocator,
-        KERNEL_LOAD_ADDRESS as u64,
+        filesystem_name,
     ) else {
         return;
     };
     let initrd_loaded = load_first_fat_file(
         volume,
-        &INITRD_CANDIDATE_PATHS,
+            initrd_candidate_path,
         &mut allocator,
+        filesystem_name,
     );
 
     // Reuse the same allocator state for artifact loads and DTB cloning so
     // later allocations cannot overlap the already-loaded kernel or initrd.
     boot_loaded_linux_artifacts(
-        filesystem_name,
-        kernel_path,
+        &kernel_path,
         &kernel_loaded,
-        initrd_loaded.as_ref().map(|(path, file)| (*path, file)),
+        initrd_loaded.as_ref().map(|(path, file)| (path, file)),
         &mut allocator,
         block_device_index,
         partition_number,
@@ -338,27 +379,27 @@ fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
         }
     };
 
-    let Some((kernel_path, kernel_loaded)) = load_first_ext4_file_at(
+    let Some((kernel_path, kernel_loaded)) = load_first_ext4_file(
         volume,
-        &KERNEL_CANDIDATE_PATHS,
+        kernel_candidate_path,
         &mut allocator,
-        KERNEL_LOAD_ADDRESS as u64,
+        filesystem_name,
     ) else {
         return;
     };
     let initrd_loaded = load_first_ext4_file(
         volume,
-        &INITRD_CANDIDATE_PATHS,
+        initrd_candidate_path,
         &mut allocator,
+        filesystem_name,
     );
 
     // Reuse the same allocator state for artifact loads and DTB cloning so
     // later allocations cannot overlap the already-loaded kernel or initrd.
     boot_loaded_linux_artifacts(
-        filesystem_name,
-        kernel_path,
+        &kernel_path,
         &kernel_loaded,
-        initrd_loaded.as_ref().map(|(path, file)| (*path, file)),
+        initrd_loaded.as_ref().map(|(path, file)| (path, file)),
         &mut allocator,
         block_device_index,
         partition_number,
@@ -371,7 +412,6 @@ fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
 ///
 /// # Parameters
 ///
-/// - `filesystem_name`: Filesystem label used in loaded-file logs.
 /// - `kernel_path`: Absolute path of the loaded kernel image.
 /// - `kernel_loaded`: Loaded kernel image placed at the Linux load address.
 /// - `initrd_loaded`: Optional loaded initrd image, preserved when present.
@@ -381,10 +421,9 @@ fn try_linux_boot_from_ext4_volume<D: BlockDevice>(
 /// - `boot_hart`: Original hart identifier received from OpenSBI.
 /// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
 fn boot_loaded_linux_artifacts(
-    filesystem_name: &str,
-    kernel_path: &str,
+    kernel_path: &BootPath,
     kernel_loaded: &LoadedFile,
-    initrd_loaded: Option<(&str, &LoadedFile)>,
+    initrd_loaded: Option<(&BootPath, &LoadedFile)>,
     allocator: &mut PageAllocator<'_>,
     block_device_index: usize,
     partition_number: u32,
@@ -408,158 +447,148 @@ fn boot_loaded_linux_artifacts(
             return;
         }
     };
-    print_loaded_file(filesystem_name, kernel_path, kernel_loaded);
-
     match check_kernel_header(kernel_loaded) {
         Ok(()) => {
             crate::println!(
                 "linux: kernel object {} matches RISC-V boot image header",
-                kernel_path,
+                kernel_path.as_str(),
             );
         }
         Err(_) => {
             crate::println!(
                 "linux: kernel object {} does not match RISC-V boot image header",
-                kernel_path,
+                kernel_path.as_str(),
             );
             return;
         }
     }
+    let kernel_loaded = match relocate_linux_kernel(allocator, kernel_loaded) {
+        Some(kernel_loaded) => kernel_loaded,
+        None => {
+            crate::println!(
+                "linux: failed to relocate kernel to aligned memory"
+            );
+            return;
+        }
+    };
+    crate::println!(
+        "linux: relocated kernel image to {:#018x}",
+        kernel_loaded.physical_start() as usize,
+    );
 
-    if let Some((initrd_path, initrd_file)) = initrd_loaded {
-        print_loaded_file(filesystem_name, initrd_path, initrd_file);
-    }
+    let initrd_loaded = initrd_loaded.map(|(path, loaded)| (path.as_str(), loaded));
 
-    let kernel_info = FileInfo::new(FileType::File, kernel_loaded.size_bytes());
-    let initrd_info = initrd_loaded.map(|(_, file)| {
-        FileInfo::new(FileType::File, file.size_bytes())
-    });
-
-    match linux_boot(
-        &kernel_info,
-        initrd_info.as_ref(),
+    if linux_boot_and_start(
+        &kernel_loaded,
+        initrd_loaded,
         &device_tree,
         allocator,
         command_line,
-    ) {
-        Ok(mut request) => {
-            match request.update_device_tree(
-                initrd_loaded.map(|(_, file)| file),
-                command_line,
-            ) {
-                Ok(()) => {}
-                Err(_) => {
-                    crate::println!("linux: failed to update cloned device-tree");
-                    return;
-                }
-            }
-            crate::print!(
-                "linux: boot request invoked {}={} @ {:#018x}",
-                kernel_path,
-                request.kernel_size_bytes(),
-                kernel_loaded.physical_start() as usize,
-            );
-            if let Some((initrd_path, initrd_file)) = initrd_loaded {
-                crate::print!(
-                    ", {}={} @ {:#018x}",
-                    initrd_path,
-                    initrd_file.size_bytes(),
-                    initrd_file.physical_start() as usize,
-                );
-            }
-            crate::println!(", cmdline='{}'", command_line);
-            crate::println!("linux: transferring control to kernel");
-
-            unsafe {
-                linux_start(
-                    kernel_loaded,
-                    boot_hart,
-                    request.device_tree().pointer(),
-                );
-            }
-        }
-        Err(_) => {
-            crate::println!("linux: boot request rejected");
-        }
+        boot_hart,
+    )
+    .is_err()
+    {
+        return;
     }
 }
 
-/// Loads the first successfully opened file in `paths` from one FAT volume.
+/// Loads the first successfully opened file from one FAT volume.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted FAT filesystem used to open candidate paths.
+/// - `candidate_path`: Returns the next candidate path for one index.
+/// - `allocator`: Page allocator used to reserve the destination pages.
+/// - `filesystem_name`: Filesystem label used in the load log.
 fn load_first_fat_file<'a, D: BlockDevice>(
     volume: &mut FatVolume<'_, D>,
-    paths: &'a [&'a str],
+    candidate_path: fn(usize) -> Option<BootPath>,
     allocator: &mut PageAllocator<'_>,
-) -> Option<(&'a str, LoadedFile)> {
+    filesystem_name: &str,
+) -> Option<(BootPath, LoadedFile)> {
     let mut index = 0usize;
-    while index < paths.len() {
-        let path = paths[index];
-        if let Ok(mut file) = volume.open(path) {
+    while let Some(path) = candidate_path(index) {
+        let path_text = path.as_str();
+        if let Ok(mut file) = volume.open(path_text) {
             if let Ok(loaded) = file.load(allocator) {
+                print_loaded_file(filesystem_name, path_text, &loaded);
                 return Some((path, loaded));
             }
         }
         index += 1;
     }
+
     None
 }
 
-/// Loads the first successfully opened file in `paths` from one FAT volume at one fixed address.
-fn load_first_fat_file_at<'a, D: BlockDevice>(
-    volume: &mut FatVolume<'_, D>,
-    paths: &'a [&'a str],
-    allocator: &mut PageAllocator<'_>,
-    physical_start: u64,
-) -> Option<(&'a str, LoadedFile)> {
-    let mut index = 0usize;
-    while index < paths.len() {
-        let path = paths[index];
-        if let Ok(mut file) = volume.open(path) {
-            if let Ok(loaded) = file.load_at(allocator, physical_start) {
-                return Some((path, loaded));
-            }
-        }
-        index += 1;
-    }
-    None
-}
-
-/// Loads the first successfully opened file in `paths` from one ext4 volume.
+/// Loads the first successfully opened file from one ext4 volume.
+///
+/// # Parameters
+///
+/// - `volume`: Mounted ext4 filesystem used to open candidate paths.
+/// - `candidate_path`: Returns the next candidate path for one index.
+/// - `allocator`: Page allocator used to reserve the destination pages.
+/// - `filesystem_name`: Filesystem label used in the load log.
 fn load_first_ext4_file<'a, D: BlockDevice>(
     volume: &mut Ext4Volume<'_, D>,
-    paths: &'a [&'a str],
+    candidate_path: fn(usize) -> Option<BootPath>,
     allocator: &mut PageAllocator<'_>,
-) -> Option<(&'a str, LoadedFile)> {
+    filesystem_name: &str,
+) -> Option<(BootPath, LoadedFile)> {
     let mut index = 0usize;
-    while index < paths.len() {
-        let path = paths[index];
-        if let Ok(mut file) = volume.open(path) {
+    while let Some(path) = candidate_path(index) {
+        let path_text = path.as_str();
+        if let Ok(mut file) = volume.open(path_text) {
             if let Ok(loaded) = file.load(allocator) {
+                print_loaded_file(filesystem_name, path_text, &loaded);
                 return Some((path, loaded));
             }
         }
         index += 1;
     }
+
     None
 }
 
-/// Loads the first successfully opened file in `paths` from one ext4 volume at one fixed address.
-fn load_first_ext4_file_at<'a, D: BlockDevice>(
-    volume: &mut Ext4Volume<'_, D>,
-    paths: &'a [&'a str],
+/// Copies one loaded kernel image into a low 2 MiB-aligned memory slot.
+///
+/// # Parameters
+///
+/// - `allocator`: Live page allocator reused for Linux boot allocations.
+/// - `kernel_loaded`: Loaded kernel image currently stored in high memory.
+fn relocate_linux_kernel(
     allocator: &mut PageAllocator<'_>,
-    physical_start: u64,
-) -> Option<(&'a str, LoadedFile)> {
-    let mut index = 0usize;
-    while index < paths.len() {
-        let path = paths[index];
-        if let Ok(mut file) = volume.open(path) {
-            if let Ok(loaded) = file.load_at(allocator, physical_start) {
-                return Some((path, loaded));
-            }
-        }
-        index += 1;
+    kernel_loaded: &LoadedFile,
+) -> Option<LoadedFile> {
+    let relocated_start = allocator
+        .allocate_aligned_pages_for_size(
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+            kernel_loaded.size_bytes(),
+            KERNEL_ALIGNMENT,
+            AllocationDirection::Low,
+        )
+        .ok()?;
+
+    unsafe {
+        ptr::copy_nonoverlapping(
+            kernel_loaded.physical_start() as *const u8,
+            relocated_start as *mut u8,
+            kernel_loaded.size_bytes(),
+        );
     }
-    None
+
+    allocator
+        .FreePages(
+            kernel_loaded.physical_start(),
+            kernel_loaded.page_count(),
+        )
+        .ok()?;
+
+    Some(LoadedFile::new(
+        relocated_start,
+        kernel_loaded.page_count(),
+        kernel_loaded.size_bytes(),
+    ))
 }
 
 /// Builds a page allocator from the live boot-time device tree.
@@ -905,9 +934,8 @@ fn run_firmware(
         if let Some(()) = try_relocate_firmware(boot_hart, device_tree, entry_stack) {
             unreachable!();
         }
-        crate::println!(
-            "rustfimware: relocation unavailable, continuing in-place"
-        );
+        crate::println!("rustfimware: relocation unavailable, powering off");
+        poweroff();
     }
 
     if firmware_runtime_base() != PRIMARY_FIRMWARE_LOAD_ADDRESS {

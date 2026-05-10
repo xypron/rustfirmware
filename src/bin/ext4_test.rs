@@ -15,6 +15,13 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+#[macro_export]
+macro_rules! println {
+    ($($arg:tt)*) => {
+        std::println!($($arg)*)
+    };
+}
+
 mod memory {
     //! Minimal std-backed page-allocation shim used by the host-side ext4 test.
 
@@ -29,8 +36,8 @@ mod memory {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     #[repr(u32)]
     pub enum EFI_MEMORY_TYPE {
-        /// Loader data used for loaded file contents.
-        EfiLoaderData = 4,
+        /// Boot-services data used for loaded file contents.
+        EfiBootServicesData = 4,
     }
 
     /// EFI page-allocation policies needed by the shared ext4 code under test.
@@ -95,6 +102,24 @@ mod memory {
             let _ = Type;
             *Memory = pointer as EFI_PHYSICAL_ADDRESS;
             Ok(())
+        }
+
+        /// Allocates enough pages to cover `size_bytes`.
+        pub fn allocate_pages_for_size(
+            &mut self,
+            memory_type: EFI_MEMORY_TYPE,
+            size_bytes: usize,
+        ) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+            let size = size_bytes.max(1);
+            let pages = size.div_ceil(EFI_PAGE_SIZE as usize);
+            let mut memory = 0;
+            self.AllocatePages(
+                EFI_ALLOCATE_TYPE::AllocateAnyPages,
+                memory_type,
+                pages,
+                &mut memory,
+            )?;
+            Ok(memory)
         }
     }
 

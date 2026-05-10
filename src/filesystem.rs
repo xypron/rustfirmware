@@ -185,6 +185,7 @@ pub trait FileHandle: FileInfoView {
         allocator: &mut PageAllocator<'_>,
         physical_start: EFI_PHYSICAL_ADDRESS,
     ) -> Result<LoadedFile, Self::Error>;
+
 }
 
 /// Filesystem that can open path-based file handles.
@@ -205,4 +206,25 @@ pub trait FileSystem {
         &'file mut self,
         path: &str,
     ) -> Result<Self::File<'file>, Self::Error>;
+}
+
+/// Prints one loaded file path plus size with a filesystem prefix.
+///
+/// # Parameters
+///
+/// - `filesystem_name`: Filesystem label shown before the file path.
+/// - `path`: Absolute path of the loaded file.
+/// - `loaded_file`: Loaded file metadata including physical address and size.
+pub fn print_loaded_file(
+    filesystem_name: &str,
+    path: &str,
+    loaded_file: &LoadedFile,
+) {
+    crate::println!(
+        "{}: loaded '{}', size={} @ {:#018x}",
+        filesystem_name,
+        path,
+        loaded_file.size_bytes(),
+        loaded_file.physical_start() as usize,
+    );
 }

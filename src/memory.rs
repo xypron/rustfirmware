@@ -104,6 +104,15 @@ pub enum EFI_ALLOCATE_TYPE {
     MaxAllocateType = 3,
 }
 
+/// Search direction for aligned page allocations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllocationDirection {
+    /// Choose the lowest suitable aligned address.
+    Low,
+    /// Choose the highest suitable aligned address.
+    High,
+}
+
 /// EFI memory descriptor fields carried in an EFI memory map.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
@@ -346,6 +355,89 @@ impl<'a> PageAllocator<'a> {
         Ok(())
     }
 
+    /// Allocates enough 4 KiB pages to cover `size_bytes` from high memory.
+    ///
+    /// # Parameters
+    ///
+    /// - `memory_type`: EFI memory type assigned to the allocated range.
+    /// - `size_bytes`: Number of bytes the allocation must cover.
+    pub fn allocate_pages_for_size(
+        &mut self,
+        memory_type: EFI_MEMORY_TYPE,
+        size_bytes: UINTN,
+    ) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+        if memory_type == EFI_MEMORY_TYPE::EfiMaxMemoryType {
+            return Err(MemoryError::InvalidParameter);
+        }
+
+        let page_count = pages_for_size(size_bytes)?;
+        let mut allocation_start = 0;
+        self.AllocatePages(
+            EFI_ALLOCATE_TYPE::AllocateAnyPages,
+            memory_type,
+            page_count,
+            &mut allocation_start,
+        )?;
+        Ok(allocation_start)
+    }
+
+    /// Allocates enough 4 KiB pages to cover `size_bytes` at an aligned
+    /// address chosen from the requested search direction.
+    ///
+    /// # Parameters
+    ///
+    /// - `memory_type`: EFI memory type assigned to the allocated range.
+    /// - `size_bytes`: Number of bytes the allocation must cover.
+    /// - `alignment`: Required physical alignment in bytes. This must be a
+    ///   non-zero multiple of 4 KiB.
+    /// - `direction`: Whether to search from the low or high end of RAM.
+    pub fn allocate_aligned_pages_for_size(
+        &mut self,
+        memory_type: EFI_MEMORY_TYPE,
+        size_bytes: UINTN,
+        alignment: UINT64,
+        direction: AllocationDirection,
+    ) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+        if memory_type == EFI_MEMORY_TYPE::EfiMaxMemoryType {
+            return Err(MemoryError::InvalidParameter);
+        }
+
+        let page_count = pages_for_size(size_bytes)?;
+        self.allocate_aligned_pages(memory_type, page_count, alignment, direction)
+    }
+
+    /// Allocates pages at an address aligned to a caller-selected boundary.
+    ///
+    /// # Parameters
+    ///
+    /// - `memory_type`: EFI memory type assigned to the allocated range.
+    /// - `pages`: Number of 4 KiB pages to allocate.
+    /// - `alignment`: Required physical alignment in bytes. This must be a
+    ///   non-zero multiple of 4 KiB.
+    /// - `direction`: Whether to search from the low or high end of RAM.
+    pub fn allocate_aligned_pages(
+        &mut self,
+        memory_type: EFI_MEMORY_TYPE,
+        pages: UINTN,
+        alignment: UINT64,
+        direction: AllocationDirection,
+    ) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+        if pages == 0
+            || memory_type == EFI_MEMORY_TYPE::EfiMaxMemoryType
+            || alignment == 0
+            || !is_page_aligned(alignment)
+        {
+            return Err(MemoryError::InvalidParameter);
+        }
+
+        let page_count = pages_to_u64(pages)?;
+        let allocation_start =
+            self.find_aligned_allocation(page_count, alignment, direction)?;
+
+        self.allocate_exact_range(allocation_start, page_count, memory_type)?;
+        Ok(allocation_start)
+    }
+
     /// Frees pages using EFI `FreePages` parameter names and types.
     ///
     /// # Parameters
@@ -488,6 +580,59 @@ impl<'a> PageAllocator<'a> {
             }
 
             candidate = Some(candidate.map_or(start, |current| max(current, start)));
+        }
+
+        candidate.ok_or(MemoryError::OutOfResources)
+    }
+
+    /// Finds one aligned conventional-memory range for `pages`.
+    ///
+    /// # Parameters
+    ///
+    /// - `pages`: Number of pages requested.
+    /// - `alignment`: Required allocation alignment in bytes.
+    /// - `direction`: Whether to search from the low or high end of RAM.
+    fn find_aligned_allocation(
+        &self,
+        pages: UINT64,
+        alignment: UINT64,
+        direction: AllocationDirection,
+    ) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+        let byte_count = pages_to_bytes(pages as UINTN)?;
+        let mut candidate = None;
+
+        for descriptor in self.descriptors() {
+            if descriptor.Type != EFI_MEMORY_TYPE::EfiConventionalMemory as UINT32 {
+                continue;
+            }
+
+            let descriptor_end = descriptor_end(*descriptor)?;
+            let Some(latest_start) = descriptor_end.checked_sub(byte_count) else {
+                continue;
+            };
+            if latest_start < descriptor.PhysicalStart {
+                continue;
+            }
+
+            let start = match direction {
+                AllocationDirection::Low =>
+                    align_up(descriptor.PhysicalStart, alignment)?,
+                AllocationDirection::High =>
+                    align_down(latest_start, alignment),
+            };
+
+            let Some(end) = start.checked_add(byte_count) else {
+                continue;
+            };
+            if start < descriptor.PhysicalStart || end > descriptor_end {
+                continue;
+            }
+
+            candidate = Some(match (candidate, direction) {
+                (Some(current), AllocationDirection::Low) => min(current, start),
+                (Some(current), AllocationDirection::High) => max(current, start),
+                (None, _) => start,
+            });
         }
 
         candidate.ok_or(MemoryError::OutOfResources)
@@ -986,6 +1131,18 @@ fn pages_to_bytes(pages: UINTN) -> Result<UINT64, MemoryError> {
     pages_to_u64(pages)?
         .checked_mul(EFI_PAGE_SIZE)
         .ok_or(MemoryError::AddressOverflow)
+}
+
+/// Converts a byte count into the minimum number of 4 KiB pages needed.
+///
+/// # Parameters
+///
+/// - `size_bytes`: Number of bytes the allocation must cover.
+fn pages_for_size(size_bytes: UINTN) -> Result<UINTN, MemoryError> {
+    let size = pages_to_u64(size_bytes)?;
+    let rounded = align_up(max(size, 1), EFI_PAGE_SIZE)?;
+    usize::try_from(bytes_to_pages(rounded))
+        .map_err(|_| MemoryError::InvalidParameter)
 }
 
 /// Converts a byte count that is already page aligned into pages.

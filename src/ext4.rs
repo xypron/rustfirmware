@@ -241,11 +241,7 @@ impl<'volume, 'device, D: BlockDevice> FileHandle for Ext4File<'volume, 'device,
         &mut self,
         allocator: &mut PageAllocator<'_>,
     ) -> Result<LoadedFile, Ext4Error> {
-        self.load_into_pages(
-            allocator,
-            EFI_ALLOCATE_TYPE::AllocateAnyPages,
-            0,
-        )
+        self.load_into_allocated_pages(allocator)
     }
 
     /// Loads the file into page-aligned EFI-style memory at one fixed address.
@@ -268,6 +264,46 @@ impl<'volume, 'device, D: BlockDevice> FileHandle for Ext4File<'volume, 'device,
 }
 
 impl<'volume, 'device, D: BlockDevice> Ext4File<'volume, 'device, D> {
+    /// Loads the resolved regular file into allocator-chosen EFI-style pages.
+    ///
+    /// # Parameters
+    ///
+    /// - `allocator`: Page allocator used to reserve the destination pages.
+    fn load_into_allocated_pages(
+        &mut self,
+        allocator: &mut PageAllocator<'_>,
+    ) -> Result<LoadedFile, Ext4Error> {
+        if self.inode.is_directory() {
+            return Err(Ext4Error::IsDirectory);
+        }
+
+        let size_bytes = usize::try_from(self.inode.size_bytes)
+            .map_err(|_| Ext4Error::BufferTooSmall)?;
+        let page_count = max(1, file_size_to_page_count(size_bytes)?);
+        let physical_start = allocator.allocate_pages_for_size(
+            EFI_MEMORY_TYPE::EfiBootServicesData,
+            size_bytes,
+        )?;
+
+        let allocation_size = page_count * EFI_PAGE_SIZE as usize;
+        let buffer = unsafe {
+            slice::from_raw_parts_mut(
+                physical_start as *mut u8,
+                allocation_size,
+            )
+        };
+        unsafe {
+            ptr::write_bytes(buffer.as_mut_ptr(), 0, buffer.len());
+        }
+
+        self.volume.read_inode_contents(
+            &self.inode,
+            &mut buffer[..size_bytes],
+        )?;
+
+        Ok(LoadedFile::new(physical_start, page_count, size_bytes))
+    }
+
     /// Loads the resolved regular file into EFI-style pages.
     ///
     /// # Parameters
@@ -291,7 +327,7 @@ impl<'volume, 'device, D: BlockDevice> Ext4File<'volume, 'device, D> {
         let mut physical_start = requested_start;
         allocator.AllocatePages(
             allocation_type,
-            EFI_MEMORY_TYPE::EfiLoaderData,
+            EFI_MEMORY_TYPE::EfiBootServicesData,
             page_count,
             &mut physical_start,
         )?;

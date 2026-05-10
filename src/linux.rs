@@ -6,7 +6,7 @@
 //! RISC-V Linux boot header, and can then transfer control into the kernel.
 
 use crate::dtb::{Dtb, DtbError};
-use crate::filesystem::{FileInfoView, FileType, LoadedFile};
+use crate::filesystem::{FileInfo, FileInfoView, FileType, LoadedFile};
 use crate::memory::PageAllocator;
 use core::arch::asm;
 use core::mem::offset_of;
@@ -218,6 +218,59 @@ where
         kernel_size_bytes: kernel.size_bytes(),
         initrd_size_bytes,
     })
+}
+
+/// Builds a Linux boot request, updates `/chosen`, and transfers control to
+/// the kernel.
+///
+/// # Parameters
+///
+/// - `kernel_image`: Loaded kernel image that will receive control.
+/// - `initrd`: Optional initrd path plus loaded image used in the DTB.
+/// - `device_tree`: Device tree object passed to the Linux boot flow.
+/// - `allocator`: Page allocator used to clone the device tree for Linux.
+/// - `command_line`: Linux kernel command line.
+/// - `boot_hart`: Hart identifier passed in register `a0`.
+pub fn boot_and_start<'a>(
+    kernel_image: &LoadedFile,
+    initrd: Option<(&str, &LoadedFile)>,
+    device_tree: &Dtb,
+    allocator: &mut PageAllocator<'_>,
+    command_line: &'a str,
+    boot_hart: usize,
+) -> Result<(), LinuxBootError> {
+    let kernel_info = FileInfo::new(FileType::File, kernel_image.size_bytes());
+    let initrd_info = initrd.map(|(_, file)| {
+        FileInfo::new(FileType::File, file.size_bytes())
+    });
+
+    let mut request = match boot(
+        &kernel_info,
+        initrd_info.as_ref(),
+        device_tree,
+        allocator,
+        command_line,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            crate::println!("linux: boot request rejected");
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = request.update_device_tree(
+        initrd.map(|(_, file)| file),
+        command_line,
+    ) {
+        crate::println!("linux: failed to update cloned device-tree");
+        return Err(error);
+    }
+
+    crate::println!("linux: transferring control to kernel");
+
+    unsafe {
+        start(kernel_image, boot_hart, request.device_tree().pointer());
+    }
 }
 
 /// Validates the RISC-V Linux boot-image header magic fields.
