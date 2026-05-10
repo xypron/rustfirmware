@@ -9,7 +9,7 @@ use crate::dtb::{Dtb, DtbError};
 use crate::ext4::Ext4Volume;
 use crate::filesystem::{load_first_file, FileInfo, FileInfoView, FileSystem, FileType, LoadedFile};
 use crate::fat::FatVolume;
-use crate::memory::{AllocationDirection, EFI_MEMORY_TYPE, PageAllocator};
+use crate::memory::{page_allocator_from_live_fdt, AllocationDirection, EFI_MEMORY_TYPE, PageAllocator, EMPTY_MEMORY_DESCRIPTOR};
 use crate::partition::PartitionEntry;
 use crate::virtio::BlockDevice;
 use core::arch::asm;
@@ -419,8 +419,8 @@ fn try_boot_from_volume<F: FileSystem>(
 ) {
     let mut regions = [crate::devicetree::MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [crate::devicetree::MemoryRegion { base: 0, size: 0 }; 16];
-    let mut memory_map = [crate::EMPTY_MEMORY_DESCRIPTOR; 32];
-    let mut allocator = match crate::page_allocator_from_live_fdt(
+    let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
+    let mut allocator = match page_allocator_from_live_fdt(
         device_tree_ptr,
         &mut regions,
         &mut reserved,

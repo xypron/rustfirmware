@@ -39,16 +39,18 @@ pub mod memory;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
-use devicetree::{Fdt, MemoryRegion};
+use devicetree::MemoryRegion;
 use diagnostics::print_diagnostics;
+use filesystem::{detect_partition_filesystem, DetectedFilesystem};
 use gpt::GptPartitionTable;
 use linux::{try_boot_from_partition as linux_try_boot_from_partition, LinuxBootFilesystem};
 use memory::{
-    EFI_ALLOCATE_TYPE, EFI_MEMORY_DESCRIPTOR, EFI_MEMORY_TYPE, PageAllocator,
+    page_allocator_from_live_fdt, EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE,
+    EMPTY_MEMORY_DESCRIPTOR,
 };
 use partition::{PartitionEntry, PartitionTable};
 use sbi::{poweroff, poweroff_on_failure};
-use virtio::{qemu_virt_block_devices, BlockDevice};
+use virtio::qemu_virt_block_devices;
 use virtio::VirtioBlockDriver;
 
 unsafe extern "C" {
@@ -160,29 +162,6 @@ fn greet() {
     );
 }
 
-/// Builds a page allocator from the live boot-time device tree.
-///
-/// # Parameters
-///
-/// - `memory_regions`: Scratch slice that receives `/memory` ranges.
-/// - `reserved_regions`: Scratch slice that receives reserved ranges.
-/// - `descriptors`: Descriptor buffer that receives the EFI-style memory map.
-fn page_allocator_from_live_fdt<'a>(
-    device_tree_ptr: *const u8,
-    memory_regions: &mut [MemoryRegion],
-    reserved_regions: &mut [MemoryRegion],
-    descriptors: &'a mut [EFI_MEMORY_DESCRIPTOR],
-) -> Option<PageAllocator<'a>> {
-    let fdt = unsafe { Fdt::from_ptr(device_tree_ptr).ok()? };
-    PageAllocator::from_fdt(
-        &fdt,
-        memory_regions,
-        reserved_regions,
-        descriptors,
-    )
-    .ok()
-}
-
 /// Allocates a high-memory destination, copies the current firmware image, and
 /// jumps into the relocated copy.
 fn try_relocate_firmware(
@@ -258,48 +237,6 @@ unsafe fn enter_relocated_copy(
             options(noreturn)
         );
     }
-}
-
-/// Empty descriptor value used for temporary EFI memory-map arrays.
-const EMPTY_MEMORY_DESCRIPTOR: EFI_MEMORY_DESCRIPTOR = EFI_MEMORY_DESCRIPTOR {
-    Type: 0,
-    PhysicalStart: 0,
-    VirtualStart: 0,
-    NumberOfPages: 0,
-    Attribute: 0,
-};
-
-/// Filesystem classification derived from probing one partition start sector.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DetectedFilesystem {
-    /// The partition mounted successfully as FAT.
-    Fat,
-    /// The partition mounted successfully as ext4.
-    Ext4,
-    /// The partition did not match the supported filesystem probes.
-    Unknown,
-}
-
-/// Detects whether one partition contains a FAT filesystem, an ext4
-/// filesystem, or neither.
-///
-/// # Parameters
-///
-/// - `device`: Block device that contains the partition.
-/// - `partition_start_lba`: First logical block of the partition.
-fn detect_partition_filesystem<D: BlockDevice>(
-    device: &mut D,
-    partition_start_lba: u64,
-) -> DetectedFilesystem {
-    if crate::fat::FatVolume::new(device, partition_start_lba).is_ok() {
-        return DetectedFilesystem::Fat;
-    }
-
-    if crate::ext4::Ext4Volume::new(device, partition_start_lba).is_ok() {
-        return DetectedFilesystem::Ext4;
-    }
-
-    DetectedFilesystem::Unknown
 }
 
 /// Probes QEMU VirtIO block devices, prints GPT partition information, and

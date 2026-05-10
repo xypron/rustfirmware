@@ -152,6 +152,40 @@ pub struct PageAllocator<'a> {
     descriptor_count: usize,
 }
 
+/// Empty descriptor value used for temporary EFI memory-map arrays.
+pub const EMPTY_MEMORY_DESCRIPTOR: EFI_MEMORY_DESCRIPTOR =
+    EFI_MEMORY_DESCRIPTOR {
+        Type: 0,
+        PhysicalStart: 0,
+        VirtualStart: 0,
+        NumberOfPages: 0,
+        Attribute: 0,
+    };
+
+/// Builds a page allocator from the live boot-time device tree.
+///
+/// # Parameters
+///
+/// - `device_tree_ptr`: Pointer to the live flattened device tree.
+/// - `memory_regions`: Scratch slice that receives `/memory` ranges.
+/// - `reserved_regions`: Scratch slice that receives reserved ranges.
+/// - `descriptors`: Descriptor buffer that receives the EFI-style memory map.
+pub fn page_allocator_from_live_fdt<'a>(
+    device_tree_ptr: *const u8,
+    memory_regions: &mut [MemoryRegion],
+    reserved_regions: &mut [MemoryRegion],
+    descriptors: &'a mut [EFI_MEMORY_DESCRIPTOR],
+) -> Option<PageAllocator<'a>> {
+    let fdt = unsafe { Fdt::from_ptr(device_tree_ptr).ok()? };
+    PageAllocator::from_fdt(
+        &fdt,
+        memory_regions,
+        reserved_regions,
+        descriptors,
+    )
+    .ok()
+}
+
 impl<'a> PageAllocator<'a> {
     /// Builds a page allocator from the RAM and reserved regions in an FDT.
     ///

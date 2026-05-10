@@ -4,7 +4,10 @@
 //! layers need when opening, inspecting, and loading files from different
 //! on-disk formats.
 
+use crate::ext4::Ext4Volume;
+use crate::fat::FatVolume;
 use crate::memory::{EFI_PHYSICAL_ADDRESS, PageAllocator};
+use crate::virtio::BlockDevice;
 use core::slice;
 
 /// Type of object referenced by one filesystem path.
@@ -206,6 +209,39 @@ pub trait FileSystem {
         &'file mut self,
         path: &str,
     ) -> Result<Self::File<'file>, Self::Error>;
+}
+
+/// Filesystem classification derived from probing one partition start sector.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetectedFilesystem {
+    /// The partition mounted successfully as FAT.
+    Fat,
+    /// The partition mounted successfully as ext4.
+    Ext4,
+    /// The partition did not match the supported filesystem probes.
+    Unknown,
+}
+
+/// Detects whether one partition contains a FAT filesystem, an ext4
+/// filesystem, or neither.
+///
+/// # Parameters
+///
+/// - `device`: Block device that contains the partition.
+/// - `partition_start_lba`: First logical block of the partition.
+pub fn detect_partition_filesystem<D: BlockDevice>(
+    device: &mut D,
+    partition_start_lba: u64,
+) -> DetectedFilesystem {
+    if FatVolume::new(device, partition_start_lba).is_ok() {
+        return DetectedFilesystem::Fat;
+    }
+
+    if Ext4Volume::new(device, partition_start_lba).is_ok() {
+        return DetectedFilesystem::Ext4;
+    }
+
+    DetectedFilesystem::Unknown
 }
 
 /// Loads the first successfully opened file from one filesystem.
