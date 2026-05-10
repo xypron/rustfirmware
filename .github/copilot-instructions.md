@@ -4,6 +4,7 @@
 - This firmware runs on top of OpenSBI.
 - Compile for the `riscv64` architecture.
 - The load address is `0x80200000`.
+- RISC-V kernel binaries must be loaded at a 2 MiB aligned address.
 - At entry, register `a0` contains the boot hart ID.
 - At entry, register `a1` contains a pointer to the device tree.
 - Save `a0` and `a1` so they can be passed on to the payload.
