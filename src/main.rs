@@ -31,6 +31,8 @@ pub mod devicetree;
 pub mod diagnostics;
 /// Formatted console output helpers built on top of OpenSBI.
 pub mod print;
+/// S-mode trap vector setup and trap handling.
+pub mod interrupts;
 /// OpenSBI constants and environment-call wrappers.
 pub mod sbi;
 /// EFI-style page allocator and memory map support.
@@ -43,6 +45,7 @@ use devicetree::MemoryRegion;
 use diagnostics::print_diagnostics;
 use filesystem::{detect_partition_filesystem, DetectedFilesystem};
 use gpt::GptPartitionTable;
+use interrupts::{install_smode_trap_vector, smode_trap_vector_offset};
 use linux::{try_boot_from_partition as linux_try_boot_from_partition, LinuxBootFilesystem};
 use memory::{
     page_allocator_from_live_fdt, EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE,
@@ -146,6 +149,17 @@ fn firmware_runtime_size() -> usize {
 /// Returns the linked offset of the relocated firmware entry inside the image.
 fn relocated_entry_offset() -> usize {
     core::ptr::addr_of!(relocated_entry) as usize
+}
+
+/// Returns the runtime address of the active image trap vector.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
+fn trap_vector_address() -> usize {
+    firmware_runtime_base()
+        .checked_add(smode_trap_vector_offset())
+        .unwrap()
 }
 
 /// Prints the firmware name, version, and build profile.
@@ -399,6 +413,8 @@ fn run_firmware(
     device_tree: *const u8,
     entry_stack: usize,
 ) -> ! {
+    install_smode_trap_vector(trap_vector_address());
+
     if boot_hart == 0 && firmware_runtime_base() == PRIMARY_FIRMWARE_LOAD_ADDRESS {
         if let Some(()) = try_relocate_firmware(boot_hart, device_tree, entry_stack) {
             unreachable!();
@@ -408,6 +424,7 @@ fn run_firmware(
     }
 
     if firmware_runtime_base() != PRIMARY_FIRMWARE_LOAD_ADDRESS {
+        install_smode_trap_vector(trap_vector_address());
         diagnostics::print_rustfw_banner();
     }
 
