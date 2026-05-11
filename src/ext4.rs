@@ -4,6 +4,7 @@
 //! resolves absolute paths by walking directory entries, follows fast and
 //! extent-backed symlinks, and reads regular-file contents through extent
 //! mappings into caller-provided buffers or EFI-style page allocations.
+//! Parent-directory path components (`..`) are rejected during resolution.
 
 use core::cmp::{max, min};
 use core::{ptr, slice, str};
@@ -32,6 +33,8 @@ const EXT4_ROOT_INODE: u32 = 2;
 const EXT4_MAX_SYMLINK_DEPTH: usize = 8;
 /// Maximum number of extents collected for one inode traversal.
 const EXT4_MAX_EXTENTS: usize = 128;
+/// Maximum depth supported by ext4 extent trees.
+const EXT4_MAX_EXTENT_DEPTH: u16 = 5;
 /// Extent header magic value.
 const EXT4_EXTENT_MAGIC: u16 = 0xf30a;
 /// Incompatible feature flag for directory entry file types.
@@ -77,6 +80,8 @@ pub enum Ext4Error {
     UnsupportedInodeSize(u16),
     /// The ext volume advertises incompatible features this reader does not understand.
     UnsupportedIncompatibleFeatures(u32),
+    /// The inode uses one mapping mode this implementation does not support.
+    UnsupportedMapping,
     /// The requested path was empty or otherwise malformed.
     InvalidPath,
     /// A required path component or file was not found.
@@ -438,7 +443,7 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
         } else {
             group_descriptor_size
         };
-        if group_descriptor_size < 32 || group_descriptor_size > 64 {
+        if group_descriptor_size != 32 && group_descriptor_size != 64 {
             return Err(Ext4Error::InvalidSuperblock);
         }
 
@@ -457,6 +462,12 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
     }
 
     /// Walks all files contained below one directory path.
+    ///
+    /// Symlinks are reported to `visitor` just like regular file-like entries.
+    /// The reported size is the inode byte size, which for symlinks is the
+    /// target-path length rather than the size of the resolved target.
+    /// Parent-directory path components (`..`) are not supported while
+    /// resolving `path`.
     ///
     /// # Parameters
     ///
@@ -512,7 +523,8 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
     /// # Parameters
     ///
     /// - `start_inode_number`: Directory inode where relative lookup begins.
-    /// - `path`: Absolute or relative ext4 path.
+    /// - `path`: Absolute or relative ext4 path. Parent-directory components
+    ///   (`..`) are rejected.
     /// - `symlink_depth`: Number of symlink expansions already performed.
     fn resolve_path_from(
         &mut self,
@@ -816,10 +828,6 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
             return Ok(0);
         }
 
-        if !inode.uses_extents() {
-            return Err(Ext4Error::InvalidExtentTree);
-        }
-
         unsafe {
             ptr::write_bytes(buffer.as_mut_ptr(), 0, size_bytes);
         }
@@ -878,6 +886,10 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
         inode: &Ext4Inode,
         extents: &mut [Ext4Extent],
     ) -> Result<usize, Ext4Error> {
+        if !inode.uses_extents() {
+            return Err(Ext4Error::UnsupportedMapping);
+        }
+
         let mut count = 0usize;
         self.collect_extent_node(&inode.block_data, extents, &mut count)?;
         Ok(count)
@@ -903,6 +915,9 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
 
         let entry_count = read_u16(node, 2).ok_or(Ext4Error::InvalidExtentTree)? as usize;
         let depth = read_u16(node, 6).ok_or(Ext4Error::InvalidExtentTree)?;
+        if depth > EXT4_MAX_EXTENT_DEPTH {
+            return Err(Ext4Error::InvalidExtentTree);
+        }
         if 12 + entry_count * 12 > node.len() {
             return Err(Ext4Error::InvalidExtentTree);
         }
@@ -1009,7 +1024,7 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
         )?;
 
         let table_low = read_u32(&descriptor, 8).ok_or(Ext4Error::InvalidSuperblock)? as u64;
-        let table_high = if self.group_descriptor_size >= 64 {
+        let table_high = if self.group_descriptor_size >= 44 {
             read_u32(&descriptor, 0x28).ok_or(Ext4Error::InvalidSuperblock)? as u64
         } else {
             0
@@ -1175,7 +1190,7 @@ fn append_path_component(
         return Err(Ext4Error::NameTooLong);
     }
 
-    let separator_index = if path_len == 0 { 0 } else { path_len };
+    let separator_index = path_len;
     path[separator_index] = b'/';
     let component_start = separator_index + 1;
     path[component_start..next_len].copy_from_slice(component);
