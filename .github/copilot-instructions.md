@@ -2,12 +2,15 @@
 
 - This is freestanding software. Do not use system libraries or `std`.
 - This firmware runs on top of OpenSBI.
+- The firmware is single-threaded; only one hart executes firmware code at a time.
 - Compile for the `riscv64` architecture.
 - The load address is `0x80200000`.
 - RISC-V kernel binaries must be loaded at a 2 MiB aligned address.
 - At entry, register `a0` contains the boot hart ID.
 - At entry, register `a1` contains a pointer to the device tree.
 - Save `a0` and `a1` so they can be passed on to the payload.
+- Write temporary logs and other scratch command output under the
+	project-local `./tmp/` directory.
 - For git commits in this repository, use the global Git user settings.
 - All git commits in this repository must include a `Signed-off-by:`
   trailer.

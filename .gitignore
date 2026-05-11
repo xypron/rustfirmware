@@ -1,5 +1,6 @@
 /target
 /build
+/tmp
 /test.img*
 /vmlinu*
 /initrd*
