@@ -16,6 +16,9 @@
 - When validating boots with QEMU, stop the test once the Linux version
 	number has been printed. Do not continue streaming the guest boot log
 	after that point.
+- For interrupt debugging, you may temporarily call
+  `interrupts::trigger_invalid_instruction_trap()` after installing the
+  S-mode trap vector, but do not leave that call active in normal code.
 - Add rustdoc comments for every module, static, constant, type alias, enum, struct, function, and method, including non-public helpers.
 - Document every function and method parameter, and document every struct field.
 - Place each rustdoc block immediately above the item it documents.
