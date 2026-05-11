@@ -7,7 +7,7 @@
 use core::ptr;
 
 use crate::dtb_read::{
-    align4, Fdt, FdtError, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE,
+    align4, Fdt, FdtError, FdtHeader, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE,
     FDT_NOP, FDT_PROP,
 };
 use crate::memory::{
@@ -18,12 +18,6 @@ use crate::memory::{
 /// Errors returned while constructing a boot-oriented DTB object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DtbError {
-    /// The supplied device-tree pointer was null.
-    NullPointer,
-    /// The supplied device-tree pointer was not 8-byte aligned.
-    MisalignedPointer,
-    /// The device-tree header did not contain the expected magic value.
-    BadMagic,
     /// The requested clone size was not larger than the header totalsize.
     InvalidCloneSize,
     /// The requested or allocated clone size could not fit in the header.
@@ -36,173 +30,10 @@ pub enum DtbError {
     NodeNotFound,
     /// The structure block contents were malformed.
     BadStructure,
-    /// The DTB header contained inconsistent offsets or section sizes.
-    InvalidHeader,
     /// Allocating pages for the cloned DTB failed.
     Memory(MemoryError),
-}
-
-/// Fixed-size flattened device-tree header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct DtbHeader {
-    /// Flattened device-tree magic number in big-endian form.
-    magic: u32,
-    /// Total blob size in bytes in big-endian form.
-    totalsize: u32,
-    /// Offset of the structure block in big-endian form.
-    off_dt_struct: u32,
-    /// Offset of the strings block in big-endian form.
-    off_dt_strings: u32,
-    /// Offset of the memory-reservation block in big-endian form.
-    off_mem_rsvmap: u32,
-    /// Device-tree format version in big-endian form.
-    version: u32,
-    /// Last compatible device-tree format version in big-endian form.
-    last_comp_version: u32,
-    /// Physical boot CPU identifier in big-endian form.
-    boot_cpuid_phys: u32,
-    /// Size of the strings block in big-endian form.
-    size_dt_strings: u32,
-    /// Size of the structure block in big-endian form.
-    size_dt_struct: u32,
-}
-
-impl DtbHeader {
-    /// Returns the decoded device-tree magic number.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn magic(&self) -> u32 {
-        u32::from_be(self.magic)
-    }
-
-    /// Returns the decoded total blob size in bytes.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn total_size(&self) -> u32 {
-        u32::from_be(self.totalsize)
-    }
-
-    /// Stores the encoded total blob size in bytes.
-    ///
-    /// # Parameters
-    ///
-    /// - `size`: Total blob size to encode into the header.
-    fn set_total_size(&mut self, size: u32) {
-        self.totalsize = size.to_be();
-    }
-
-    /// Returns the decoded structure-block offset.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn off_dt_struct(&self) -> u32 {
-        u32::from_be(self.off_dt_struct)
-    }
-
-    /// Returns the decoded strings-block offset.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn off_dt_strings(&self) -> u32 {
-        u32::from_be(self.off_dt_strings)
-    }
-
-    /// Returns the decoded memory-reservation-block offset.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn off_mem_rsvmap(&self) -> u32 {
-        u32::from_be(self.off_mem_rsvmap)
-    }
-
-    /// Returns the decoded device-tree format version.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn version(&self) -> u32 {
-        u32::from_be(self.version)
-    }
-
-    /// Returns the decoded last compatible format version.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn last_comp_version(&self) -> u32 {
-        u32::from_be(self.last_comp_version)
-    }
-
-    /// Returns the decoded physical boot CPU identifier.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn boot_cpuid_phys(&self) -> u32 {
-        u32::from_be(self.boot_cpuid_phys)
-    }
-
-    /// Returns the decoded strings-block size in bytes.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn size_dt_strings(&self) -> u32 {
-        u32::from_be(self.size_dt_strings)
-    }
-
-    /// Returns the decoded structure-block size in bytes.
-    ///
-    /// # Parameters
-    ///
-    /// This function does not accept parameters.
-    pub fn size_dt_struct(&self) -> u32 {
-        u32::from_be(self.size_dt_struct)
-    }
-
-    /// Stores the encoded strings-block offset.
-    ///
-    /// # Parameters
-    ///
-    /// - `offset`: Strings-block offset to encode into the header.
-    fn set_off_dt_strings(&mut self, offset: u32) {
-        self.off_dt_strings = offset.to_be();
-    }
-
-    /// Stores the encoded structure-block size.
-    ///
-    /// # Parameters
-    ///
-    /// - `size`: Structure-block size to encode into the header.
-    fn set_size_dt_struct(&mut self, size: u32) {
-        self.size_dt_struct = size.to_be();
-    }
-
-    /// Stores the encoded strings-block size.
-    ///
-    /// # Parameters
-    ///
-    /// - `size`: Strings-block size to encode into the header.
-    fn set_size_dt_strings(&mut self, size: u32) {
-        self.size_dt_strings = size.to_be();
-    }
-}
-
-/// Located node range within the structure block.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct NodeLocation {
-    /// Absolute byte offset of the node's `FDT_BEGIN_NODE` token.
-    begin_offset: usize,
-    /// Absolute byte offset of the node's matching `FDT_END_NODE` token.
-    end_offset: usize,
+    /// Low-level FDT validation or parsing failed.
+    Fdt(FdtError),
 }
 
 /// Located property record within the structure block.
@@ -213,6 +44,10 @@ struct PropertyLocation {
     /// Total encoded property length, including token, header, and padding.
     total_length: usize,
 }
+
+/// Maximum encoded byte length for one string property including the trailing
+/// zero byte.
+const MAX_PROPERTY_STRING_LEN: usize = 256;
 
 /// Boot-oriented device-tree object passed to boot methods.
 pub struct Dtb {
@@ -285,7 +120,7 @@ impl Dtb {
                 0,
                 allocated_size - header_total_size,
             );
-            (&mut *(cloned_pointer as *mut DtbHeader))
+            (&mut *(cloned_pointer as *mut FdtHeader))
                 .set_total_size(allocated_total_size);
         }
 
@@ -300,10 +135,10 @@ impl Dtb {
     /// # Parameters
     ///
     /// This function does not accept parameters.
-    pub fn header(&self) -> &DtbHeader {
+    fn header(&self) -> &FdtHeader {
         // SAFETY: All `Dtb` values are constructed from pointers validated by
         // `from_ptr()` and continue to point at a DTB header for their lifetime.
-        unsafe { &*(self.pointer as *const DtbHeader) }
+        unsafe { &*(self.pointer as *const FdtHeader) }
     }
 
     /// Returns the pointer to the start of the device-tree blob.
@@ -351,17 +186,35 @@ impl Dtb {
             return Err(DtbError::InvalidPath);
         }
 
-        let root = self.root_node()?;
-        let mut parent = root;
+        let root = self.fdt_view()?.root_node().ok_or(DtbError::BadStructure)?;
+        let mut parent_begin_offset = root.begin_offset();
+        let mut parent_end_offset = root.end_offset();
         for component in components {
             if component.is_empty() {
                 return Err(DtbError::InvalidPath);
             }
 
-            parent = match self.find_child(parent, component)? {
-                Some(child) => child,
-                None => self.insert_child_node(parent, component)?,
+            let child_offsets = {
+                let fdt = self.fdt_view()?;
+                let parent = fdt
+                    .node_at_offset(parent_begin_offset)
+                    .ok_or(DtbError::BadStructure)?;
+                fdt.find_child(parent, component)
+                    .map(|child| (child.begin_offset(), child.end_offset()))
             };
+
+            match child_offsets {
+                Some((child_begin_offset, child_end_offset)) => {
+                    parent_begin_offset = child_begin_offset;
+                    parent_end_offset = child_end_offset;
+                }
+                None => {
+                    let (child_begin_offset, child_end_offset) =
+                        self.insert_child_node(parent_end_offset, component)?;
+                    parent_begin_offset = child_begin_offset;
+                    parent_end_offset = child_end_offset;
+                }
+            }
         }
 
         Ok(())
@@ -380,7 +233,7 @@ impl Dtb {
         property_name: &str,
         value: u32,
     ) -> Result<(), DtbError> {
-        self.set_property(node_path, property_name, &value.to_be_bytes())
+        self.set_property_bytes(node_path, property_name, &value.to_be_bytes())
     }
 
     /// Creates or replaces one 64-bit property on an existing node.
@@ -396,7 +249,7 @@ impl Dtb {
         property_name: &str,
         value: u64,
     ) -> Result<(), DtbError> {
-        self.set_property(node_path, property_name, &value.to_be_bytes())
+        self.set_property_bytes(node_path, property_name, &value.to_be_bytes())
     }
 
     /// Creates or replaces one zero-terminated string property.
@@ -412,7 +265,7 @@ impl Dtb {
         property_name: &str,
         value: &str,
     ) -> Result<(), DtbError> {
-        let mut property_bytes = [0u8; 256];
+        let mut property_bytes = [0u8; MAX_PROPERTY_STRING_LEN];
         let property_len = value
             .len()
             .checked_add(1)
@@ -431,43 +284,13 @@ impl Dtb {
     ///
     /// - `offset`: Byte offset where the encoded value should be written.
     /// - `value`: 32-bit value to encode and insert.
-    pub fn insert_u32(
+    fn insert_u32(
         &mut self,
         offset: usize,
         value: u32,
     ) -> Result<usize, DtbError> {
         let bytes = value.to_be_bytes();
         self.insert_bytes(offset, &bytes)
-    }
-
-    /// Inserts one 64-bit big-endian value into the DTB buffer.
-    ///
-    /// # Parameters
-    ///
-    /// - `offset`: Byte offset where the encoded value should be written.
-    /// - `value`: 64-bit value to encode and insert.
-    pub fn insert_u64(
-        &mut self,
-        offset: usize,
-        value: u64,
-    ) -> Result<usize, DtbError> {
-        let bytes = value.to_be_bytes();
-        self.insert_bytes(offset, &bytes)
-    }
-
-    /// Inserts one zero-terminated UTF-8 string into the DTB buffer.
-    ///
-    /// # Parameters
-    ///
-    /// - `offset`: Byte offset where the string should be written.
-    /// - `value`: UTF-8 string value to insert, followed by one zero byte.
-    pub fn insert_string(
-        &mut self,
-        offset: usize,
-        value: &str,
-    ) -> Result<usize, DtbError> {
-        let next_offset = self.insert_bytes(offset, value.as_bytes())?;
-        self.insert_bytes(next_offset, &[0])
     }
 
     /// Inserts raw bytes into the DTB buffer and returns the next byte offset.
@@ -509,13 +332,13 @@ impl Dtb {
     /// - `node_path`: Absolute device-tree path of the target node.
     /// - `property_name`: Name of the property to create or replace.
     /// - `value`: Property payload bytes.
-    fn set_property_bytes(
+    pub fn set_property_bytes(
         &mut self,
         node_path: &str,
         property_name: &str,
         value: &[u8],
     ) -> Result<(), DtbError> {
-        let node = self.find_node(node_path)?;
+        let node = self.find_node_location(node_path)?;
         let name_offset = self.find_or_add_string(property_name)?;
         let record_offset = self.prepare_property_record(node, property_name, value.len())?;
 
@@ -529,47 +352,24 @@ impl Dtb {
         Ok(())
     }
 
-    /// Creates or replaces one property payload exactly as provided.
-    ///
-    /// # Parameters
-    ///
-    /// - `node_path`: Absolute device-tree path of the target node.
-    /// - `property_name`: Name of the property to create or replace.
-    /// - `value`: Property payload bytes.
-    fn set_property(
-        &mut self,
-        node_path: &str,
-        property_name: &str,
-        value: &[u8],
-    ) -> Result<(), DtbError> {
-        self.set_property_bytes(node_path, property_name, value)
-    }
-
-    /// Returns the root node from the structure block.
+    /// Returns one transient read-only FDT view over the current blob.
     ///
     /// # Parameters
     ///
     /// This function does not accept parameters.
-    fn root_node(&self) -> Result<NodeLocation, DtbError> {
-        let begin_offset = self.header().off_dt_struct() as usize;
-        if self.read_token(begin_offset)? != FDT_BEGIN_NODE {
-            return Err(DtbError::BadStructure);
-        }
-
-        Ok(NodeLocation {
-            begin_offset,
-            end_offset: self.node_end_offset(begin_offset)?,
-        })
+    fn fdt_view(&self) -> Result<Fdt<'_>, DtbError> {
+        unsafe { Fdt::from_ptr(self.pointer) }.map_err(DtbError::from)
     }
 
-    /// Finds one existing absolute node path.
+    /// Resolves one absolute node path to its current structure-block node.
     ///
     /// # Parameters
     ///
     /// - `path`: Absolute device-tree path to resolve.
-    fn find_node(&self, path: &str) -> Result<NodeLocation, DtbError> {
+    fn find_node_location(&self, path: &str) -> Result<(usize, usize), DtbError> {
         if path == "/" {
-            return self.root_node();
+            let root = self.fdt_view()?.root_node().ok_or(DtbError::BadStructure)?;
+            return Ok((root.begin_offset(), root.end_offset()));
         }
 
         let mut components = path.split('/');
@@ -577,69 +377,14 @@ impl Dtb {
             return Err(DtbError::InvalidPath);
         }
 
-        let mut node = self.root_node()?;
-        for component in components {
+        for component in components.clone() {
             if component.is_empty() {
                 return Err(DtbError::InvalidPath);
             }
-
-            node = self
-                .find_child(node, component)?
-                .ok_or(DtbError::NodeNotFound)?;
         }
 
-        Ok(node)
-    }
-
-    /// Finds one direct child node by name under `parent`.
-    ///
-    /// # Parameters
-    ///
-    /// - `parent`: Parent node to search under.
-    /// - `name`: Direct child node name to find.
-    fn find_child(
-        &self,
-        parent: NodeLocation,
-        name: &str,
-    ) -> Result<Option<NodeLocation>, DtbError> {
-        let mut offset = self.after_begin_node(parent.begin_offset)?;
-        let mut depth = 0usize;
-
-        while offset < parent.end_offset {
-            let token = self.read_token(offset)?;
-            match token {
-                FDT_BEGIN_NODE => {
-                    let (node_name, next_offset) = self.read_node_name(offset)?;
-                    if depth == 0 && node_name == name {
-                        return Ok(Some(NodeLocation {
-                            begin_offset: offset,
-                            end_offset: self.node_end_offset(offset)?,
-                        }));
-                    }
-
-                    depth += 1;
-                    offset = next_offset;
-                }
-                FDT_END_NODE => {
-                    if depth == 0 {
-                        return Err(DtbError::BadStructure);
-                    }
-
-                    depth -= 1;
-                    offset += 4;
-                }
-                FDT_PROP => {
-                    offset = self.after_property(offset)?;
-                }
-                FDT_NOP => {
-                    offset += 4;
-                }
-                FDT_END => return Err(DtbError::BadStructure),
-                _ => return Err(DtbError::BadStructure),
-            }
-        }
-
-        Ok(None)
+        let node = self.fdt_view()?.find_node(path).ok_or(DtbError::NodeNotFound)?;
+        Ok((node.begin_offset(), node.end_offset()))
     }
 
     /// Inserts one new empty child node under `parent`.
@@ -650,9 +395,9 @@ impl Dtb {
     /// - `name`: Name of the new child node.
     fn insert_child_node(
         &mut self,
-        parent: NodeLocation,
+        parent_end_offset: usize,
         name: &str,
-    ) -> Result<NodeLocation, DtbError> {
+    ) -> Result<(usize, usize), DtbError> {
         let mut node_bytes = [0u8; 4 + 256 + 4 + 3];
         let required = 4usize
             .checked_add(name.len())
@@ -671,23 +416,21 @@ impl Dtb {
         node_bytes[end_token_offset..end_token_offset + 4]
             .copy_from_slice(&FDT_END_NODE.to_be_bytes());
 
-        let insertion_offset = parent.end_offset;
-        self.splice_struct(insertion_offset, 0, &node_bytes[..end_token_offset + 4])?;
+        let insertion_offset = parent_end_offset;
+        self.splice_struct(
+            self.structure_offset_in_blob(insertion_offset),
+            0,
+            &node_bytes[..end_token_offset + 4],
+        )?;
 
-        Ok(NodeLocation {
-            begin_offset: insertion_offset,
-            end_offset: insertion_offset + end_token_offset,
-        })
-    }
-
-    /// Returns the absolute offset after one `FDT_BEGIN_NODE` record.
-    ///
-    /// # Parameters
-    ///
-    /// - `begin_offset`: Absolute offset of the `FDT_BEGIN_NODE` token.
-    fn after_begin_node(&self, begin_offset: usize) -> Result<usize, DtbError> {
-        let (_, next_offset) = self.read_node_name(begin_offset)?;
-        Ok(next_offset)
+        let inserted_node = self
+            .fdt_view()?
+            .node_at_offset(insertion_offset)
+            .ok_or(DtbError::BadStructure)?;
+        Ok((
+            inserted_node.begin_offset(),
+            inserted_node.end_offset(),
+        ))
     }
 
     /// Finds one direct property under `node` by name.
@@ -698,21 +441,28 @@ impl Dtb {
     /// - `property_name`: Property name to find.
     fn find_direct_property(
         &self,
-        node: NodeLocation,
+        node: (usize, usize),
         property_name: &str,
     ) -> Result<Option<PropertyLocation>, DtbError> {
-        let mut offset = self.after_begin_node(node.begin_offset)?;
+        let fdt = self.fdt_view()?;
+        let mut offset = fdt
+            .after_begin_node(node.0)
+            .ok_or(DtbError::BadStructure)?;
 
-        while offset < node.end_offset {
-            let token = self.read_token(offset)?;
+        while offset < node.1 {
+            let token = fdt.read_token(offset).ok_or(DtbError::BadStructure)?;
             match token {
                 FDT_PROP => {
-                    let value_length = self.read_token(offset + 4)? as usize;
-                    let name_offset = self.read_token(offset + 8)?;
+                    let value_length =
+                        fdt.read_token(offset + 4).ok_or(DtbError::BadStructure)? as usize;
+                    let name_offset =
+                        fdt.read_token(offset + 8).ok_or(DtbError::BadStructure)?;
                     let total_length = property_record_length(value_length)?;
-                    if self.name_at(name_offset as usize)? == property_name {
+                    if fdt.string_at(name_offset as usize).ok_or(DtbError::BadStructure)?
+                        == property_name
+                    {
                         return Ok(Some(PropertyLocation {
-                            property_offset: offset,
+                            property_offset: self.structure_offset_in_blob(offset),
                             total_length,
                         }));
                     }
@@ -740,7 +490,7 @@ impl Dtb {
     /// - `value_length`: Final property payload length in bytes.
     fn prepare_property_record(
         &mut self,
-        node: NodeLocation,
+        node: (usize, usize),
         property_name: &str,
         value_length: usize,
     ) -> Result<usize, DtbError> {
@@ -770,102 +520,35 @@ impl Dtb {
     /// - `node`: Node that will receive the new property.
     fn property_insertion_offset(
         &self,
-        node: NodeLocation,
+        node: (usize, usize),
     ) -> Result<usize, DtbError> {
-        let mut offset = self.after_begin_node(node.begin_offset)?;
+        let fdt = self.fdt_view()?;
+        let mut offset = fdt
+            .after_begin_node(node.0)
+            .ok_or(DtbError::BadStructure)?;
 
-        if offset == node.end_offset {
-            return Ok(node.end_offset);
+        if offset == node.1 {
+            return Ok(self.structure_offset_in_blob(node.1));
         }
 
-        while offset < node.end_offset {
-            let token = self.read_token(offset)?;
+        while offset < node.1 {
+            let token = fdt.read_token(offset).ok_or(DtbError::BadStructure)?;
             match token {
                 FDT_PROP => {
-                    offset = self.after_property(offset)?;
+                    offset = fdt.after_property(offset).ok_or(DtbError::BadStructure)?;
                 }
                 FDT_NOP => {
                     offset += 4;
                 }
-                FDT_BEGIN_NODE | FDT_END_NODE => return Ok(offset),
+                FDT_BEGIN_NODE | FDT_END_NODE => {
+                    return Ok(self.structure_offset_in_blob(offset));
+                }
                 FDT_END => return Err(DtbError::BadStructure),
                 _ => return Err(DtbError::BadStructure),
             }
         }
 
-        Ok(node.end_offset)
-    }
-
-    /// Returns the absolute offset after one property record.
-    ///
-    /// # Parameters
-    ///
-    /// - `property_offset`: Absolute offset of the `FDT_PROP` token.
-    fn after_property(&self, property_offset: usize) -> Result<usize, DtbError> {
-        let length = self.read_token(property_offset + 4)? as usize;
-        let value_offset = property_offset + 12;
-        let value_end = value_offset
-            .checked_add(length)
-            .ok_or(DtbError::SizeOverflow)?;
-        self.ensure_range(value_offset, length)?;
-        Ok(align4(value_end))
-    }
-
-    /// Reads one node name and returns the aligned next offset.
-    ///
-    /// # Parameters
-    ///
-    /// - `begin_offset`: Absolute offset of the `FDT_BEGIN_NODE` token.
-    fn read_node_name<'a>(
-        &'a self,
-        begin_offset: usize,
-    ) -> Result<(&'a str, usize), DtbError> {
-        if self.read_token(begin_offset)? != FDT_BEGIN_NODE {
-            return Err(DtbError::BadStructure);
-        }
-
-        let name_offset = begin_offset + 4;
-        let structure_end = self.structure_end_offset();
-        let bytes = self.blob_bytes();
-        let mut cursor = name_offset;
-        while cursor < structure_end {
-            if bytes[cursor] == 0 {
-                let name = core::str::from_utf8(&bytes[name_offset..cursor])
-                    .map_err(|_| DtbError::BadStructure)?;
-                return Ok((name, align4(cursor + 1)));
-            }
-            cursor += 1;
-        }
-
-        Err(DtbError::BadStructure)
-    }
-
-    /// Returns one property name from the strings block.
-    ///
-    /// # Parameters
-    ///
-    /// - `name_offset`: Offset within the strings block.
-    fn name_at<'a>(&'a self, name_offset: usize) -> Result<&'a str, DtbError> {
-        let strings_start = self.header().off_dt_strings() as usize;
-        let strings_end = self.used_blob_end_offset();
-        let absolute_offset = strings_start
-            .checked_add(name_offset)
-            .ok_or(DtbError::SizeOverflow)?;
-        if absolute_offset >= strings_end {
-            return Err(DtbError::BadStructure);
-        }
-
-        let bytes = self.blob_bytes();
-        let mut cursor = absolute_offset;
-        while cursor < strings_end {
-            if bytes[cursor] == 0 {
-                return core::str::from_utf8(&bytes[absolute_offset..cursor])
-                    .map_err(|_| DtbError::BadStructure);
-            }
-            cursor += 1;
-        }
-
-        Err(DtbError::BadStructure)
+        Ok(self.structure_offset_in_blob(node.1))
     }
 
     /// Finds an existing property-name string or appends one to the strings block.
@@ -918,48 +601,13 @@ impl Dtb {
         // SAFETY: The DTB header lives at the start of `self.pointer`, and the
         // strings-size field is updated only after the appended bytes were
         // written successfully within the allocation.
-        let header = unsafe { &mut *(self.pointer.cast_mut() as *mut DtbHeader) };
+        let header = unsafe { &mut *(self.pointer.cast_mut() as *mut FdtHeader) };
         header.set_size_dt_strings(
             u32::try_from(strings_size + append_length)
                 .map_err(|_| DtbError::SizeOverflow)?,
         );
 
         u32::try_from(append_offset).map_err(|_| DtbError::SizeOverflow)
-    }
-
-    /// Finds the matching `FDT_END_NODE` token for one node.
-    ///
-    /// # Parameters
-    ///
-    /// - `begin_offset`: Absolute offset of the `FDT_BEGIN_NODE` token.
-    fn node_end_offset(&self, begin_offset: usize) -> Result<usize, DtbError> {
-        let mut offset = begin_offset;
-        let mut depth = 0usize;
-
-        loop {
-            let token = self.read_token(offset)?;
-            match token {
-                FDT_BEGIN_NODE => {
-                    depth = depth.checked_add(1).ok_or(DtbError::BadStructure)?;
-                    offset = self.after_begin_node(offset)?;
-                }
-                FDT_END_NODE => {
-                    depth = depth.checked_sub(1).ok_or(DtbError::BadStructure)?;
-                    if depth == 0 {
-                        return Ok(offset);
-                    }
-                    offset += 4;
-                }
-                FDT_PROP => {
-                    offset = self.after_property(offset)?;
-                }
-                FDT_NOP => {
-                    offset += 4;
-                }
-                FDT_END => return Err(DtbError::BadStructure),
-                _ => return Err(DtbError::BadStructure),
-            }
-        }
     }
 
     /// Inserts or removes bytes inside the structure block.
@@ -1037,7 +685,7 @@ impl Dtb {
         let delta_i32 = i32::try_from(delta).map_err(|_| DtbError::SizeOverflow)?;
         // SAFETY: The DTB header is stored at the start of the allocation and
         // is updated atomically after the structure splice succeeds.
-        let header = unsafe { &mut *(self.pointer.cast_mut() as *mut DtbHeader) };
+        let header = unsafe { &mut *(self.pointer.cast_mut() as *mut FdtHeader) };
         header.set_size_dt_struct(
             header
                 .size_dt_struct()
@@ -1081,22 +729,6 @@ impl Dtb {
         Ok(())
     }
 
-    /// Reads one structure token from the blob.
-    ///
-    /// # Parameters
-    ///
-    /// - `offset`: Absolute offset of the token to read.
-    fn read_token(&self, offset: usize) -> Result<u32, DtbError> {
-        self.ensure_range(offset, 4)?;
-        let bytes = self.blob_bytes();
-        Ok(u32::from_be_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]))
-    }
-
     /// Returns the absolute end offset of the structure block.
     ///
     /// # Parameters
@@ -1104,6 +736,16 @@ impl Dtb {
     /// This function does not accept parameters.
     fn structure_end_offset(&self) -> usize {
         self.header().off_dt_struct() as usize + self.header().size_dt_struct() as usize
+    }
+
+    /// Converts one structure-block-relative offset into a blob-absolute
+    /// offset.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Byte offset relative to the start of the structure block.
+    fn structure_offset_in_blob(&self, offset: usize) -> usize {
+        self.header().off_dt_struct() as usize + offset
     }
 
     /// Returns the absolute end offset of the used blob contents.
@@ -1171,13 +813,6 @@ impl From<FdtError> for DtbError {
     ///
     /// - `error`: Reader-side validation error to wrap.
     fn from(error: FdtError) -> Self {
-        match error {
-            FdtError::NullPointer => Self::NullPointer,
-            FdtError::MisalignedPointer => Self::MisalignedPointer,
-            FdtError::BadMagic => Self::BadMagic,
-            FdtError::Truncated
-            | FdtError::UnsupportedVersion
-            | FdtError::InvalidHeader => Self::InvalidHeader,
-        }
+        Self::Fdt(error)
     }
 }

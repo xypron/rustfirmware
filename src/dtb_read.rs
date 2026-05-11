@@ -41,6 +41,160 @@ pub enum FdtError {
     InvalidHeader,
 }
 
+/// Fixed-size flattened device-tree header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct FdtHeader {
+    /// Flattened device-tree magic number in big-endian form.
+    magic: u32,
+    /// Total blob size in bytes in big-endian form.
+    totalsize: u32,
+    /// Offset of the structure block in big-endian form.
+    off_dt_struct: u32,
+    /// Offset of the strings block in big-endian form.
+    off_dt_strings: u32,
+    /// Offset of the memory-reservation block in big-endian form.
+    off_mem_rsvmap: u32,
+    /// Device-tree format version in big-endian form.
+    version: u32,
+    /// Last compatible device-tree format version in big-endian form.
+    last_comp_version: u32,
+    /// Physical boot CPU identifier in big-endian form.
+    boot_cpuid_phys: u32,
+    /// Size of the strings block in big-endian form.
+    size_dt_strings: u32,
+    /// Size of the structure block in big-endian form.
+    size_dt_struct: u32,
+}
+
+impl FdtHeader {
+    /// Returns the decoded device-tree magic number.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn magic(&self) -> u32 {
+        u32::from_be(self.magic)
+    }
+
+    /// Returns the decoded total blob size in bytes.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn total_size(&self) -> u32 {
+        u32::from_be(self.totalsize)
+    }
+
+    /// Stores the encoded total blob size in bytes.
+    ///
+    /// # Parameters
+    ///
+    /// - `size`: Total blob size to encode into the header.
+    pub(crate) fn set_total_size(&mut self, size: u32) {
+        self.totalsize = size.to_be();
+    }
+
+    /// Returns the decoded structure-block offset.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn off_dt_struct(&self) -> u32 {
+        u32::from_be(self.off_dt_struct)
+    }
+
+    /// Returns the decoded strings-block offset.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn off_dt_strings(&self) -> u32 {
+        u32::from_be(self.off_dt_strings)
+    }
+
+    /// Returns the decoded memory-reservation-block offset.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn off_mem_rsvmap(&self) -> u32 {
+        u32::from_be(self.off_mem_rsvmap)
+    }
+
+    /// Returns the decoded device-tree format version.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn version(&self) -> u32 {
+        u32::from_be(self.version)
+    }
+
+    /// Returns the decoded last compatible format version.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn last_comp_version(&self) -> u32 {
+        u32::from_be(self.last_comp_version)
+    }
+
+    /// Returns the decoded physical boot CPU identifier.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn boot_cpuid_phys(&self) -> u32 {
+        u32::from_be(self.boot_cpuid_phys)
+    }
+
+    /// Returns the decoded strings-block size in bytes.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn size_dt_strings(&self) -> u32 {
+        u32::from_be(self.size_dt_strings)
+    }
+
+    /// Returns the decoded structure-block size in bytes.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub fn size_dt_struct(&self) -> u32 {
+        u32::from_be(self.size_dt_struct)
+    }
+
+    /// Stores the encoded strings-block offset.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Strings-block offset to encode into the header.
+    pub(crate) fn set_off_dt_strings(&mut self, offset: u32) {
+        self.off_dt_strings = offset.to_be();
+    }
+
+    /// Stores the encoded structure-block size.
+    ///
+    /// # Parameters
+    ///
+    /// - `size`: Structure-block size to encode into the header.
+    pub(crate) fn set_size_dt_struct(&mut self, size: u32) {
+        self.size_dt_struct = size.to_be();
+    }
+
+    /// Stores the encoded strings-block size.
+    ///
+    /// # Parameters
+    ///
+    /// - `size`: Strings-block size to encode into the header.
+    pub(crate) fn set_size_dt_strings(&mut self, size: u32) {
+        self.size_dt_strings = size.to_be();
+    }
+}
+
 /// One validated node inside the FDT structure block.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FdtNode<'a> {
@@ -50,6 +204,27 @@ pub struct FdtNode<'a> {
     begin_offset: usize,
     /// Absolute byte offset of the node's matching `FDT_END_NODE` token.
     end_offset: usize,
+}
+
+impl<'a> FdtNode<'a> {
+    /// Returns the absolute byte offset of the node's `FDT_BEGIN_NODE` token.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub(crate) fn begin_offset(&self) -> usize {
+        self.begin_offset
+    }
+
+    /// Returns the absolute byte offset of the node's matching `FDT_END_NODE`
+    /// token.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub(crate) fn end_offset(&self) -> usize {
+        self.end_offset
+    }
 }
 
 /// One decoded reserve-map entry from the FDT header area.
@@ -365,7 +540,7 @@ impl<'a> Fdt<'a> {
     /// # Parameters
     ///
     /// - `offset`: Absolute byte offset of one `FDT_BEGIN_NODE` token.
-    fn node_at_offset(&self, offset: usize) -> Option<FdtNode<'a>> {
+    pub(crate) fn node_at_offset(&self, offset: usize) -> Option<FdtNode<'a>> {
         if self.read_token(offset)? != FDT_BEGIN_NODE {
             return None;
         }
@@ -386,7 +561,7 @@ impl<'a> Fdt<'a> {
     /// # Parameters
     ///
     /// - `begin_offset`: Absolute byte offset of one `FDT_BEGIN_NODE` token.
-    fn after_begin_node(&self, begin_offset: usize) -> Option<usize> {
+    pub(crate) fn after_begin_node(&self, begin_offset: usize) -> Option<usize> {
         if self.read_token(begin_offset)? != FDT_BEGIN_NODE {
             return None;
         }
@@ -401,7 +576,7 @@ impl<'a> Fdt<'a> {
     /// # Parameters
     ///
     /// - `property_offset`: Absolute byte offset of one `FDT_PROP` token.
-    fn after_property(&self, property_offset: usize) -> Option<usize> {
+    pub(crate) fn after_property(&self, property_offset: usize) -> Option<usize> {
         let length = self.read_token(property_offset + 4)? as usize;
         let value_offset = property_offset.checked_add(12)?;
         let value_end = value_offset.checked_add(length)?;
@@ -414,7 +589,7 @@ impl<'a> Fdt<'a> {
     /// # Parameters
     ///
     /// - `begin_offset`: Absolute byte offset of one `FDT_BEGIN_NODE` token.
-    fn node_end_offset(&self, begin_offset: usize) -> Option<usize> {
+    pub(crate) fn node_end_offset(&self, begin_offset: usize) -> Option<usize> {
         let mut offset = begin_offset;
         let mut depth = 0usize;
 
@@ -448,7 +623,7 @@ impl<'a> Fdt<'a> {
     /// # Parameters
     ///
     /// - `offset`: Byte offset within the structure block.
-    fn read_token(&self, offset: usize) -> Option<u32> {
+    pub(crate) fn read_token(&self, offset: usize) -> Option<u32> {
         read_be_u32_from_slice(self.structure, offset)
     }
 
@@ -457,7 +632,7 @@ impl<'a> Fdt<'a> {
     /// # Parameters
     ///
     /// - `offset`: Byte offset within the strings block.
-    fn string_at(&self, offset: usize) -> Option<&'a str> {
+    pub(crate) fn string_at(&self, offset: usize) -> Option<&'a str> {
         let bytes = self.strings.get(offset..)?;
         let end = bytes.iter().position(|byte| *byte == 0)?;
         str::from_utf8(&bytes[..end]).ok()
