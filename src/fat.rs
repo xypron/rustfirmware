@@ -6,6 +6,7 @@
 
 use core::char;
 use core::cmp::{max, min};
+use core::mem::size_of;
 use core::{ptr, slice};
 use core::str;
 
@@ -78,6 +79,8 @@ pub enum FatError {
     InvalidCluster(u32),
     /// A file's cluster chain ended before the declared file size was read.
     ChainTooShort,
+    /// The file or its backing allocation is too large for this target.
+    FileTooLarge,
     /// A VFAT long-name sequence was malformed.
     InvalidLongName,
     /// A decoded file name exceeded the supported in-memory limit.
@@ -246,10 +249,11 @@ impl<'volume, 'device, D: BlockDevice> FatFile<'volume, 'device, D> {
             size_bytes,
         )?;
 
-        let allocation_size = page_count * EFI_PAGE_SIZE as usize;
+        let allocation_size = allocation_size_bytes(page_count)?;
+        let buffer_start = physical_address_as_mut_ptr(physical_start)?;
         let buffer = unsafe {
             slice::from_raw_parts_mut(
-                physical_start as *mut u8,
+                buffer_start,
                 allocation_size,
             )
         };
@@ -285,10 +289,11 @@ impl<'volume, 'device, D: BlockDevice> FatFile<'volume, 'device, D> {
             &mut physical_start,
         )?;
 
-        let allocation_size = page_count * EFI_PAGE_SIZE as usize;
+        let allocation_size = allocation_size_bytes(page_count)?;
+        let buffer_start = physical_address_as_mut_ptr(physical_start)?;
         let buffer = unsafe {
             slice::from_raw_parts_mut(
-                physical_start as *mut u8,
+                buffer_start,
                 allocation_size,
             )
         };
@@ -1402,7 +1407,35 @@ fn file_size_to_page_count(file_size: u32) -> Result<usize, FatError> {
     let page_size = EFI_PAGE_SIZE as usize;
     let page_count = (file_size as usize)
         .checked_add(page_size - 1)
-        .ok_or(FatError::InvalidBootSector)?
+        .ok_or(FatError::FileTooLarge)?
         / page_size;
     Ok(page_count)
+}
+
+/// Converts one page count into the corresponding allocation size in bytes.
+///
+/// # Parameters
+///
+/// - `page_count`: Number of 4 KiB pages in the allocation.
+fn allocation_size_bytes(page_count: usize) -> Result<usize, FatError> {
+    page_count
+        .checked_mul(EFI_PAGE_SIZE as usize)
+        .ok_or(FatError::FileTooLarge)
+}
+
+/// Converts one EFI physical address into a mutable byte pointer.
+///
+/// # Parameters
+///
+/// - `physical_start`: Physical address returned by the page allocator.
+fn physical_address_as_mut_ptr(
+    physical_start: EFI_PHYSICAL_ADDRESS,
+) -> Result<*mut u8, FatError> {
+    if size_of::<usize>() < size_of::<EFI_PHYSICAL_ADDRESS>()
+        && physical_start > usize::MAX as EFI_PHYSICAL_ADDRESS
+    {
+        return Err(FatError::FileTooLarge);
+    }
+
+    Ok(physical_start as usize as *mut u8)
 }
