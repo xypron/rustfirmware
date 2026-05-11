@@ -15,6 +15,13 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
+#[macro_export]
+macro_rules! println {
+    ($($arg:tt)*) => {
+        std::println!($($arg)*)
+    };
+}
+
 mod memory {
     //! Minimal std-backed page-allocation shim used by the host-side FAT test.
 
@@ -27,10 +34,13 @@ mod memory {
 
     /// EFI memory types needed by the shared FAT code under test.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[allow(dead_code)]
     #[repr(u32)]
     pub enum EFI_MEMORY_TYPE {
         /// Loader data used for loaded file contents.
         EfiLoaderData = 4,
+        /// Boot-services data used by the production FAT load path.
+        EfiBootServicesData = 6,
     }
 
     /// EFI page-allocation policies needed by the shared FAT code under test.
@@ -114,6 +124,28 @@ mod memory {
                 }
             }
         }
+
+        /// Allocates enough pages to store `size_bytes` and returns the start address.
+        pub fn allocate_pages_for_size(
+            &mut self,
+            _memory_type: EFI_MEMORY_TYPE,
+            size_bytes: usize,
+        ) -> Result<EFI_PHYSICAL_ADDRESS, MemoryError> {
+            let page_size = EFI_PAGE_SIZE as usize;
+            let page_count = size_bytes
+                .max(1)
+                .checked_add(page_size - 1)
+                .ok_or(MemoryError::OutOfResources)?
+                / page_size;
+            let mut address = 0;
+            self.AllocatePages(
+                EFI_ALLOCATE_TYPE::AllocateAnyPages,
+                EFI_MEMORY_TYPE::EfiBootServicesData,
+                page_count,
+                &mut address,
+            )?;
+            Ok(address)
+        }
     }
 
     impl Drop for PageAllocator<'_> {
@@ -150,6 +182,25 @@ mod virtio {
 
         /// Reads one or more contiguous 512-byte sectors into `buffer`.
         fn read_blocks(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), VirtioError>;
+    }
+}
+
+mod ext4 {
+    //! Minimal stub so shared filesystem helpers can compile in the FAT host test.
+
+    use crate::virtio::BlockDevice;
+
+    /// Host-test ext4 stub used only to satisfy shared filesystem imports.
+    pub struct Ext4Volume;
+
+    impl Ext4Volume {
+        /// The FAT host test never mounts ext4, so this always reports failure.
+        pub fn new<D: BlockDevice>(
+            _device: &mut D,
+            _partition_start_lba: u64,
+        ) -> Result<Self, ()> {
+            Err(())
+        }
     }
 }
 

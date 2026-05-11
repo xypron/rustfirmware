@@ -76,6 +76,8 @@ pub enum FatError {
     BufferTooSmall,
     /// The filesystem contained an invalid or out-of-range cluster number.
     InvalidCluster(u32),
+    /// A file's cluster chain ended before the declared file size was read.
+    ChainTooShort,
     /// A VFAT long-name sequence was malformed.
     InvalidLongName,
     /// A decoded file name exceeded the supported in-memory limit.
@@ -190,6 +192,11 @@ impl<'volume, 'device, D: BlockDevice> FileHandle
 {
     type Error = FatError;
 
+    /// Loads the resolved regular file into allocator-chosen EFI-style pages.
+    ///
+    /// # Parameters
+    ///
+    /// - `allocator`: Page allocator used to reserve the destination pages.
     fn load(
         &mut self,
         allocator: &mut PageAllocator<'_>,
@@ -353,6 +360,8 @@ struct LongNameState {
     code_units: [u16; FAT_LONG_NAME_CODE_UNITS],
     /// Highest ordinal value announced by the long-name sequence.
     max_ordinal: u8,
+    /// Next ordinal value expected while assembling the sequence.
+    next_ordinal: u8,
     /// Bitmask of long-name ordinals already observed.
     ordinal_mask: u32,
     /// Short-name checksum carried by the long-name entries.
@@ -371,6 +380,7 @@ impl LongNameState {
         Self {
             code_units: [0xffff; FAT_LONG_NAME_CODE_UNITS],
             max_ordinal: 0,
+            next_ordinal: 0,
             ordinal_mask: 0,
             checksum: 0,
             active: false,
@@ -385,6 +395,7 @@ impl LongNameState {
     fn clear(&mut self) {
         self.code_units = [0xffff; FAT_LONG_NAME_CODE_UNITS];
         self.max_ordinal = 0;
+        self.next_ordinal = 0;
         self.ordinal_mask = 0;
         self.checksum = 0;
         self.active = false;
@@ -408,10 +419,16 @@ impl LongNameState {
             self.clear();
             self.active = true;
             self.max_ordinal = ordinal;
+            self.next_ordinal = ordinal;
             self.checksum = entry[13];
         }
 
         if !self.active || ordinal > self.max_ordinal || entry[13] != self.checksum {
+            self.clear();
+            return Err(FatError::InvalidLongName);
+        }
+
+        if ordinal != self.next_ordinal {
             self.clear();
             return Err(FatError::InvalidLongName);
         }
@@ -424,6 +441,7 @@ impl LongNameState {
 
         copy_lfn_code_units(entry, &mut self.code_units[start..start + 13]);
         self.ordinal_mask |= 1u32 << (ordinal - 1);
+        self.next_ordinal = ordinal.saturating_sub(1);
         Ok(())
     }
 
@@ -815,7 +833,7 @@ impl<'a, D: BlockDevice> FatVolume<'a, D> {
 
             cluster = self.next_cluster(cluster)?;
             if self.is_end_of_chain(cluster) {
-                return Err(FatError::InvalidCluster(cluster));
+                return Err(FatError::ChainTooShort);
             }
         }
 
@@ -952,6 +970,8 @@ impl<'a, D: BlockDevice> FatVolume<'a, D> {
         }
 
         let full_path_len = append_path_component(path, path_len, name)?;
+        // SAFETY: `append_path_component()` writes only an ASCII slash and the
+        // UTF-8 bytes copied from `name`, so the populated prefix is valid UTF-8.
         let full_path = unsafe { str::from_utf8_unchecked(&path[..full_path_len]) };
 
         if entry.is_directory() {
@@ -1036,6 +1056,9 @@ impl<'a, D: BlockDevice> FatVolume<'a, D> {
 
     /// Returns the next cluster in a FAT chain.
     ///
+    /// This implementation reads only the first FAT copy and does not fall
+    /// back to mirrored FATs.
+    ///
     /// # Parameters
     ///
     /// - `cluster`: Current cluster number whose FAT entry should be read.
@@ -1092,7 +1115,8 @@ fn scan_directory_sector(
 ) -> Result<DirectoryScanResult, FatError> {
     let mut offset = 0usize;
     while offset < sector.len() {
-        let entry = sector_entry(sector, offset);
+        let entry = sector_entry(sector, offset)
+            .ok_or(FatError::InvalidBootSector)?;
         let first_byte = entry[0];
 
         if first_byte == 0x00 {
@@ -1160,7 +1184,8 @@ where
 {
     let mut offset = 0usize;
     while offset < sector.len() {
-        let entry = sector_entry(sector, offset);
+        let entry = sector_entry(sector, offset)
+            .ok_or(FatError::InvalidBootSector)?;
         let first_byte = entry[0];
 
         if first_byte == 0x00 {
@@ -1215,7 +1240,10 @@ fn append_path_component(
     path_len: usize,
     component: &str,
 ) -> Result<usize, FatError> {
-    let total_len = path_len + 1 + component.len();
+    let total_len = path_len
+        .checked_add(1)
+        .and_then(|len| len.checked_add(component.len()))
+        .ok_or(FatError::NameTooLong)?;
     if total_len > path.len() {
         return Err(FatError::NameTooLong);
     }
@@ -1234,10 +1262,11 @@ fn append_path_component(
 fn sector_entry(
     sector: &[u8; VIRTIO_SECTOR_SIZE],
     offset: usize,
-) -> [u8; FAT_DIR_ENTRY_SIZE] {
+) -> Option<[u8; FAT_DIR_ENTRY_SIZE]> {
     let mut entry = [0u8; FAT_DIR_ENTRY_SIZE];
-    entry.copy_from_slice(&sector[offset..offset + FAT_DIR_ENTRY_SIZE]);
-    entry
+    let bytes = sector.get(offset..offset + FAT_DIR_ENTRY_SIZE)?;
+    entry.copy_from_slice(bytes);
+    Some(entry)
 }
 
 /// Parses one regular FAT directory entry.
@@ -1300,6 +1329,8 @@ fn decode_short_name<'a>(
         output = 1;
     }
 
+    // SAFETY: `buffer[..output]` contains only bytes copied from the on-disk
+    // short name plus an ASCII period, so it is valid UTF-8.
     unsafe { str::from_utf8_unchecked(&buffer[..output]) }
 }
 
