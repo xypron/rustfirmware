@@ -1,36 +1,24 @@
 //! Flattened device tree parsing helpers.
 //!
-//! The current implementation is intentionally read-only. It validates the FDT
-//! header, exposes RAM ranges from `/memory`, and reports reserved regions from
-//! both the reserve map and the `/reserved-memory` subtree. The module is meant
-//! to grow into a future device-tree editing layer.
+//! This module validates one flattened device-tree blob and exposes read-only
+//! node, property, and reserve-map accessors without embedding policy-specific
+//! interpretation such as RAM or reserved-memory queries.
 
 use core::slice;
 use core::str;
 
-use crate::memory::{MemoryError, PageAllocator};
-
 /// Flattened device tree header magic value.
-const FDT_MAGIC: u32 = 0xd00d_feed;
+pub(crate) const FDT_MAGIC: u32 = 0xd00d_feed;
 /// Structure token marking the start of a node.
-const FDT_BEGIN_NODE: u32 = 1;
+pub(crate) const FDT_BEGIN_NODE: u32 = 1;
 /// Structure token marking the end of a node.
-const FDT_END_NODE: u32 = 2;
+pub(crate) const FDT_END_NODE: u32 = 2;
 /// Structure token marking a property record.
-const FDT_PROP: u32 = 3;
+pub(crate) const FDT_PROP: u32 = 3;
 /// Structure token marking a no-op padding entry.
-const FDT_NOP: u32 = 4;
+pub(crate) const FDT_NOP: u32 = 4;
 /// Structure token marking the end of the structure block.
-const FDT_END: u32 = 9;
-
-/// One memory or reserved-memory range decoded from an FDT.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MemoryRegion {
-    /// Start address of the decoded region.
-    pub base: u64,
-    /// Size in bytes of the decoded region.
-    pub size: u64,
-}
+pub(crate) const FDT_END: u32 = 9;
 
 /// Errors returned while validating the flattened device tree blob.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,6 +29,26 @@ pub enum FdtError {
     Truncated,
     /// The blob version is older than the minimum supported format version.
     UnsupportedVersion,
+}
+
+/// One validated node inside the FDT structure block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FdtNode<'a> {
+    /// Node name taken directly from the structure block.
+    pub name: &'a str,
+    /// Absolute byte offset of the node's `FDT_BEGIN_NODE` token.
+    begin_offset: usize,
+    /// Absolute byte offset of the node's matching `FDT_END_NODE` token.
+    end_offset: usize,
+}
+
+/// One decoded reserve-map entry from the FDT header area.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FdtReserveEntry {
+    /// Start address of the reserved range.
+    pub address: u64,
+    /// Size in bytes of the reserved range.
+    pub size: u64,
 }
 
 /// Read-only view of one flattened device tree blob.
@@ -100,300 +108,265 @@ impl<'a> Fdt<'a> {
         })
     }
 
-    /// Reserves the original FDT blob in one EFI-style page allocator.
+    /// Returns the root node from the validated structure block.
     ///
     /// # Parameters
     ///
-    /// - `allocator`: Page allocator whose map should reserve the original FDT.
-    pub fn reserve_in(&self, allocator: &mut PageAllocator<'_>) -> Result<(), MemoryError> {
-        allocator.reserve_region(MemoryRegion {
-            base: self.base as u64,
-            size: u64::try_from(self.total_size).map_err(|_| MemoryError::AddressOverflow)?,
-        })
+    /// This function does not accept parameters.
+    pub fn root_node(&self) -> Option<FdtNode<'a>> {
+        self.node_at_offset(0)
     }
 
-    /// Collects memory ranges from `/memory` nodes into `output`.
+    /// Visits each direct child of `parent` in structure-block order.
+    ///
+    /// Returning `false` from `visit` stops the iteration early.
     ///
     /// # Parameters
     ///
-    /// - `output`: Destination slice that receives decoded RAM ranges.
-    pub fn memory_regions(&self, output: &mut [MemoryRegion]) -> usize {
-        let mut cursor = 0usize;
-        let mut depth = 0usize;
-        let mut root_address_cells = 2u32;
-        let mut root_size_cells = 1u32;
-        let mut current_address_cells = [2u32; 16];
-        let mut current_size_cells = [1u32; 16];
-        let mut memory_depth: Option<usize> = None;
-        let mut count = 0usize;
+    /// - `parent`: Parent node whose direct children should be visited.
+    /// - `visit`: Callback invoked once for each direct child node.
+    pub fn for_each_child(
+        &self,
+        parent: FdtNode<'a>,
+        mut visit: impl FnMut(FdtNode<'a>) -> bool,
+    ) {
+        let Some(mut offset) = self.after_begin_node(parent.begin_offset) else {
+            return;
+        };
 
-        while let Some(token) = self.read_token(cursor) {
-            cursor += 4;
+        while offset < parent.end_offset {
+            let Some(token) = self.read_token(offset) else {
+                break;
+            };
 
             match token {
-                FDT_BEGIN_NODE => {
-                    let (name, next_cursor) = match self.read_c_string(self.structure, cursor) {
-                        Some(value) => value,
-                        None => break,
-                    };
-                    cursor = align4(next_cursor);
-
-                    if depth + 1 < current_address_cells.len() {
-                        current_address_cells[depth + 1] = current_address_cells[depth];
-                        current_size_cells[depth + 1] = current_size_cells[depth];
-                    }
-
-                    if (name == "memory" || name.starts_with("memory@")) && depth == 1 {
-                        memory_depth = Some(depth + 1);
-                    }
-
-                    depth += 1;
-                }
-                FDT_END_NODE => {
-                    if memory_depth == Some(depth) {
-                        memory_depth = None;
-                    }
-
-                    if depth == 0 {
-                        break;
-                    }
-
-                    depth -= 1;
-                }
                 FDT_PROP => {
-                    let len = match self.read_token(cursor) {
-                        Some(value) => value as usize,
-                        None => break,
+                    let Some(next_offset) = self.after_property(offset) else {
+                        break;
                     };
-                    let nameoff = match self.read_token(cursor + 4) {
-                        Some(value) => value as usize,
-                        None => break,
+                    offset = next_offset;
+                }
+                FDT_NOP => {
+                    offset += 4;
+                }
+                FDT_BEGIN_NODE => {
+                    let Some(child) = self.node_at_offset(offset) else {
+                        break;
                     };
-                    let value_offset = cursor + 8;
-                    let value_end = value_offset + len;
-                    if value_end > self.structure.len() {
+                    if !visit(child) {
                         break;
                     }
-
-                    let name = match self.string_at(nameoff) {
-                        Some(value) => value,
-                        None => break,
+                    let Some(next_offset) = child.end_offset.checked_add(4) else {
+                        break;
                     };
-                    let value = &self.structure[value_offset..value_end];
-
-                    if depth == 1 && name == "#address-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            root_address_cells = cells;
-                            current_address_cells[depth] = cells;
-                        }
-                    } else if depth == 1 && name == "#size-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            root_size_cells = cells;
-                            current_size_cells[depth] = cells;
-                        }
-                    } else if depth < current_address_cells.len() && name == "#address-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            current_address_cells[depth] = cells;
-                        }
-                    } else if depth < current_size_cells.len() && name == "#size-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            current_size_cells[depth] = cells;
-                        }
-                    } else if memory_depth == Some(depth) && name == "device_type" {
-                        if value != b"memory\0" {
-                            memory_depth = None;
-                        }
-                    } else if memory_depth == Some(depth) && name == "reg" {
-                        let address_cells = root_address_cells as usize;
-                        let size_cells = root_size_cells as usize;
-                        let stride = (address_cells + size_cells) * 4;
-
-                        if stride != 0 {
-                            let mut index = 0usize;
-                            while index + stride <= value.len() && count < output.len() {
-                                let base = read_cells(&value[index..index + address_cells * 4], address_cells);
-                                let size = read_cells(
-                                    &value[index + address_cells * 4..index + stride],
-                                    size_cells,
-                                );
-                                output[count] = MemoryRegion { base, size };
-                                count += 1;
-                                index += stride;
-                            }
-                        }
-                    }
-
-                    cursor = align4(value_end);
+                    offset = next_offset;
                 }
-                FDT_NOP => {}
-                FDT_END => break,
+                FDT_END_NODE | FDT_END => break,
                 _ => break,
             }
         }
-
-        count
     }
 
-    /// Collects reserved regions from both the FDT reserve map and the
-    /// `/reserved-memory` subtree into `output`.
+    /// Returns one property value by name from `node`.
     ///
     /// # Parameters
     ///
-    /// - `output`: Destination slice that receives decoded reserved ranges.
-    pub fn reserved_regions(&self, output: &mut [MemoryRegion]) -> usize {
-        let mut count = self.reserve_map_regions(output);
-        if count < output.len() {
-            count += self.reserved_memory_regions(&mut output[count..]);
+    /// - `node`: Node whose direct properties should be searched.
+    /// - `property_name`: Name of the property to look up.
+    pub fn property(&self, node: FdtNode<'a>, property_name: &str) -> Option<&'a [u8]> {
+        let mut offset = self.after_begin_node(node.begin_offset)?;
+
+        while offset < node.end_offset {
+            match self.read_token(offset)? {
+                FDT_PROP => {
+                    let value_length = self.read_token(offset + 4)? as usize;
+                    let name_offset = self.read_token(offset + 8)? as usize;
+                    let value_offset = offset + 12;
+                    let value_end = value_offset.checked_add(value_length)?;
+                    let name = self.string_at(name_offset)?;
+
+                    if name == property_name {
+                        return self.structure.get(value_offset..value_end);
+                    }
+
+                    offset = align4(value_end);
+                }
+                FDT_NOP => {
+                    offset += 4;
+                }
+                FDT_BEGIN_NODE | FDT_END_NODE | FDT_END => return None,
+                _ => return None,
+            }
         }
-        count
+
+        None
     }
 
-    fn reserve_map_regions(&self, output: &mut [MemoryRegion]) -> usize {
+    /// Visits each decoded reserve-map entry in header order.
+    ///
+    /// Returning `false` from `visit` stops the iteration early.
+    ///
+    /// # Parameters
+    ///
+    /// - `visit`: Callback invoked once for each decoded reserve-map entry.
+    pub fn for_each_reserve_entry(
+        &self,
+        mut visit: impl FnMut(FdtReserveEntry) -> bool,
+    ) {
         let mut offset = 0usize;
-        let mut count = 0usize;
 
-        while count < output.len() {
-            let address = match read_be_u64_from_slice(self.reserve_map, offset) {
-                Some(value) => value,
-                None => break,
+        loop {
+            let Some(address) = read_be_u64_from_slice(self.reserve_map, offset) else {
+                break;
             };
-            let size = match read_be_u64_from_slice(self.reserve_map, offset + 8) {
-                Some(value) => value,
-                None => break,
+            let Some(size) = read_be_u64_from_slice(self.reserve_map, offset + 8) else {
+                break;
             };
 
             if address == 0 && size == 0 {
                 break;
             }
 
-            output[count] = MemoryRegion { base: address, size };
-            count += 1;
+            if !visit(FdtReserveEntry { address, size }) {
+                break;
+            }
+
             offset += 16;
         }
-
-        count
     }
 
-    fn reserved_memory_regions(&self, output: &mut [MemoryRegion]) -> usize {
-        let mut cursor = 0usize;
-        let mut depth = 0usize;
-        let mut current_address_cells = [2u32; 16];
-        let mut current_size_cells = [1u32; 16];
-        let mut reserved_depth: Option<usize> = None;
-        let mut count = 0usize;
+    /// Returns the raw start pointer of the validated FDT blob.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub(crate) fn base_ptr(&self) -> *const u8 {
+        self.base
+    }
 
-        while let Some(token) = self.read_token(cursor) {
-            cursor += 4;
+    /// Returns the validated total FDT blob size in bytes.
+    ///
+    /// # Parameters
+    ///
+    /// This function does not accept parameters.
+    pub(crate) fn total_size_bytes(&self) -> usize {
+        self.total_size
+    }
 
-            match token {
-                FDT_BEGIN_NODE => {
-                    let (name, next_cursor) = match self.read_c_string(self.structure, cursor) {
-                        Some(value) => value,
-                        None => break,
-                    };
-                    cursor = align4(next_cursor);
-
-                    if depth + 1 < current_address_cells.len() {
-                        current_address_cells[depth + 1] = current_address_cells[depth];
-                        current_size_cells[depth + 1] = current_size_cells[depth];
-                    }
-
-                    if name == "reserved-memory" && depth == 1 {
-                        reserved_depth = Some(depth + 1);
-                    }
-
-                    depth += 1;
-                }
-                FDT_END_NODE => {
-                    if reserved_depth == Some(depth) {
-                        reserved_depth = None;
-                    }
-
-                    if depth == 0 {
-                        break;
-                    }
-
-                    depth -= 1;
-                }
-                FDT_PROP => {
-                    let len = match self.read_token(cursor) {
-                        Some(value) => value as usize,
-                        None => break,
-                    };
-                    let nameoff = match self.read_token(cursor + 4) {
-                        Some(value) => value as usize,
-                        None => break,
-                    };
-                    let value_offset = cursor + 8;
-                    let value_end = value_offset + len;
-                    if value_end > self.structure.len() {
-                        break;
-                    }
-
-                    let name = match self.string_at(nameoff) {
-                        Some(value) => value,
-                        None => break,
-                    };
-                    let value = &self.structure[value_offset..value_end];
-
-                    if depth == 1 && name == "#address-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            current_address_cells[depth] = cells;
-                        }
-                    } else if depth == 1 && name == "#size-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            current_size_cells[depth] = cells;
-                        }
-                    } else if depth < current_address_cells.len() && name == "#address-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            current_address_cells[depth] = cells;
-                        }
-                    } else if depth < current_size_cells.len() && name == "#size-cells" {
-                        if let Some(cells) = read_be_u32_from_slice(value, 0) {
-                            current_size_cells[depth] = cells;
-                        }
-                    } else if reserved_depth.is_some() && depth > reserved_depth.unwrap_or(0) && name == "reg" {
-                        let address_cells = current_address_cells[reserved_depth.unwrap_or(depth)] as usize;
-                        let size_cells = current_size_cells[reserved_depth.unwrap_or(depth)] as usize;
-                        let stride = (address_cells + size_cells) * 4;
-
-                        if stride != 0 {
-                            let mut index = 0usize;
-                            while index + stride <= value.len() && count < output.len() {
-                                let base = read_cells(&value[index..index + address_cells * 4], address_cells);
-                                let size = read_cells(
-                                    &value[index + address_cells * 4..index + stride],
-                                    size_cells,
-                                );
-                                output[count] = MemoryRegion { base, size };
-                                count += 1;
-                                index += stride;
-                            }
-                        }
-                    }
-
-                    cursor = align4(value_end);
-                }
-                FDT_NOP => {}
-                FDT_END => break,
-                _ => break,
-            }
+    /// Builds one validated node view from a structure-block offset.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Absolute byte offset of one `FDT_BEGIN_NODE` token.
+    fn node_at_offset(&self, offset: usize) -> Option<FdtNode<'a>> {
+        if self.read_token(offset)? != FDT_BEGIN_NODE {
+            return None;
         }
 
-        count
+        let name_offset = offset.checked_add(4)?;
+        let (name, _) = self.read_c_string(self.structure, name_offset)?;
+        let end_offset = self.node_end_offset(offset)?;
+
+        Some(FdtNode {
+            name,
+            begin_offset: offset,
+            end_offset,
+        })
     }
 
+    /// Returns the offset immediately after one `FDT_BEGIN_NODE` record.
+    ///
+    /// # Parameters
+    ///
+    /// - `begin_offset`: Absolute byte offset of one `FDT_BEGIN_NODE` token.
+    fn after_begin_node(&self, begin_offset: usize) -> Option<usize> {
+        if self.read_token(begin_offset)? != FDT_BEGIN_NODE {
+            return None;
+        }
+
+        let name_offset = begin_offset.checked_add(4)?;
+        let (_, next_offset) = self.read_c_string(self.structure, name_offset)?;
+        Some(align4(next_offset))
+    }
+
+    /// Returns the offset immediately after one property record.
+    ///
+    /// # Parameters
+    ///
+    /// - `property_offset`: Absolute byte offset of one `FDT_PROP` token.
+    fn after_property(&self, property_offset: usize) -> Option<usize> {
+        let length = self.read_token(property_offset + 4)? as usize;
+        let value_offset = property_offset.checked_add(12)?;
+        let value_end = value_offset.checked_add(length)?;
+        self.structure.get(value_offset..value_end)?;
+        Some(align4(value_end))
+    }
+
+    /// Finds the matching `FDT_END_NODE` token for one node.
+    ///
+    /// # Parameters
+    ///
+    /// - `begin_offset`: Absolute byte offset of one `FDT_BEGIN_NODE` token.
+    fn node_end_offset(&self, begin_offset: usize) -> Option<usize> {
+        let mut offset = begin_offset;
+        let mut depth = 0usize;
+
+        loop {
+            match self.read_token(offset)? {
+                FDT_BEGIN_NODE => {
+                    depth = depth.checked_add(1)?;
+                    offset = self.after_begin_node(offset)?;
+                }
+                FDT_END_NODE => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(offset);
+                    }
+                    offset = offset.checked_add(4)?;
+                }
+                FDT_PROP => {
+                    offset = self.after_property(offset)?;
+                }
+                FDT_NOP => {
+                    offset = offset.checked_add(4)?;
+                }
+                FDT_END => return None,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Reads one structure token from the validated structure block.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Byte offset within the structure block.
     fn read_token(&self, offset: usize) -> Option<u32> {
         read_be_u32_from_slice(self.structure, offset)
     }
 
+    /// Returns one NUL-terminated string from the strings block.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Byte offset within the strings block.
     fn string_at(&self, offset: usize) -> Option<&'a str> {
         let bytes = self.strings.get(offset..)?;
         let end = bytes.iter().position(|byte| *byte == 0)?;
         str::from_utf8(&bytes[..end]).ok()
     }
 
-    fn read_c_string<'b>(&self, bytes: &'b [u8], offset: usize) -> Option<(&'b str, usize)> {
+    /// Reads one NUL-terminated UTF-8 string from `bytes` at `offset`.
+    ///
+    /// # Parameters
+    ///
+    /// - `bytes`: Byte slice containing the C string.
+    /// - `offset`: Starting byte offset within `bytes`.
+    fn read_c_string<'b>(
+        &self,
+        bytes: &'b [u8],
+        offset: usize,
+    ) -> Option<(&'b str, usize)> {
         let rest = bytes.get(offset..)?;
         let end = rest.iter().position(|byte| *byte == 0)?;
         let name = str::from_utf8(&rest[..end]).ok()?;
@@ -401,21 +374,32 @@ impl<'a> Fdt<'a> {
     }
 }
 
-fn align4(value: usize) -> usize {
+/// Returns `value` rounded up to the next 4-byte boundary.
+///
+/// # Parameters
+///
+/// - `value`: Byte offset or length to align.
+pub(crate) fn align4(value: usize) -> usize {
     (value + 3) & !3
 }
 
-fn read_be_u32(ptr_raw: *const u8, offset: usize) -> Option<u32> {
-    let word_ptr = unsafe { ptr_raw.add(offset) };
-    let bytes = unsafe { slice::from_raw_parts(word_ptr, 4) };
-    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-fn read_be_u32_from_slice(bytes: &[u8], offset: usize) -> Option<u32> {
+/// Reads one big-endian 32-bit value from `bytes` at `offset`.
+///
+/// # Parameters
+///
+/// - `bytes`: Source byte slice.
+/// - `offset`: Starting byte offset of the 32-bit value.
+pub(crate) fn read_be_u32_from_slice(bytes: &[u8], offset: usize) -> Option<u32> {
     let word = bytes.get(offset..offset + 4)?;
     Some(u32::from_be_bytes([word[0], word[1], word[2], word[3]]))
 }
 
+/// Reads one big-endian 64-bit value from `bytes` at `offset`.
+///
+/// # Parameters
+///
+/// - `bytes`: Source byte slice.
+/// - `offset`: Starting byte offset of the 64-bit value.
 fn read_be_u64_from_slice(bytes: &[u8], offset: usize) -> Option<u64> {
     let word = bytes.get(offset..offset + 8)?;
     Some(u64::from_be_bytes([
@@ -423,7 +407,13 @@ fn read_be_u64_from_slice(bytes: &[u8], offset: usize) -> Option<u64> {
     ]))
 }
 
-fn read_cells(bytes: &[u8], cells: usize) -> u64 {
+/// Decodes one big-endian cell sequence into a 64-bit integer.
+///
+/// # Parameters
+///
+/// - `bytes`: Cell bytes to decode.
+/// - `cells`: Number of 32-bit cells contained in `bytes`.
+pub(crate) fn read_cells(bytes: &[u8], cells: usize) -> u64 {
     let mut value = 0u64;
     let mut index = 0usize;
 
@@ -435,4 +425,16 @@ fn read_cells(bytes: &[u8], cells: usize) -> u64 {
     }
 
     value
+}
+
+/// Reads one big-endian 32-bit value directly from the FDT blob.
+///
+/// # Parameters
+///
+/// - `ptr_raw`: Raw pointer to the start of the FDT blob.
+/// - `offset`: Starting byte offset of the 32-bit value.
+fn read_be_u32(ptr_raw: *const u8, offset: usize) -> Option<u32> {
+    let word_ptr = unsafe { ptr_raw.add(offset) };
+    let bytes = unsafe { slice::from_raw_parts(word_ptr, 4) };
+    Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }

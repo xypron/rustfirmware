@@ -409,8 +409,8 @@ fn try_boot_from_volume<F: FileSystem>(
     boot_hart: usize,
     device_tree_ptr: *const u8,
 ) {
-    let mut regions = [crate::dtb_read::MemoryRegion { base: 0, size: 0 }; 8];
-    let mut reserved = [crate::dtb_read::MemoryRegion { base: 0, size: 0 }; 16];
+    let mut regions = [crate::dtb_memory::MemoryRegion { base: 0, size: 0 }; 8];
+    let mut reserved = [crate::dtb_memory::MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
     let mut allocator = match page_allocator_from_live_fdt(
         device_tree_ptr,

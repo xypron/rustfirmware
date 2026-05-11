@@ -7,23 +7,14 @@
 use core::mem::size_of;
 use core::ptr;
 
+use crate::dtb_read::{
+    align4, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, FDT_MAGIC, FDT_NOP,
+    FDT_PROP,
+};
 use crate::memory::{
     EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE, EFI_PAGE_SIZE, MemoryError,
     PageAllocator,
 };
-
-/// Flattened device-tree header magic value.
-const FDT_MAGIC: u32 = 0xd00d_feed;
-/// Structure token marking the start of a node.
-const FDT_BEGIN_NODE: u32 = 1;
-/// Structure token marking the end of a node.
-const FDT_END_NODE: u32 = 2;
-/// Structure token marking a property record.
-const FDT_PROP: u32 = 3;
-/// Structure token marking a no-op padding entry.
-const FDT_NOP: u32 = 4;
-/// Structure token marking the end of the structure block.
-const FDT_END: u32 = 9;
 
 /// Errors returned while constructing a boot-oriented DTB object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1169,15 +1160,6 @@ impl Dtb {
 
         Ok(())
     }
-}
-
-/// Returns `value` rounded up to the next 4-byte boundary.
-///
-/// # Parameters
-///
-/// - `value`: Byte offset or length to align.
-fn align4(value: usize) -> usize {
-    (value + 3) & !3
 }
 
 /// Returns the aligned encoded length of one property record.

@@ -27,6 +27,8 @@ pub mod ext4;
 pub mod dtb_write;
 /// Flattened device tree parsing helpers used for diagnostics and future edits.
 pub mod dtb_read;
+/// Device-tree memory-region interpretation helpers.
+pub mod dtb_memory;
 /// Firmware diagnostics output and reporting.
 pub mod diagnostics;
 /// Formatted console output helpers built on top of OpenSBI.
@@ -41,7 +43,7 @@ pub mod memory;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
-use dtb_read::MemoryRegion;
+use dtb_memory::MemoryRegion;
 use diagnostics::print_diagnostics;
 use filesystem::{detect_partition_filesystem, DetectedFilesystem};
 use gpt::GptPartitionTable;

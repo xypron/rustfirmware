@@ -3,7 +3,12 @@
 //! This module prints raw device-tree information first and then prints the
 //! EFI-style page map built from that information by the memory subsystem.
 
-use crate::dtb_read::{Fdt, MemoryRegion};
+use crate::dtb_memory::{
+    memory_regions as dtb_memory_regions,
+    reserved_regions as dtb_reserved_regions,
+    MemoryRegion,
+};
+use crate::dtb_read::Fdt;
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 
 /// Prints the RustFW ASCII-art banner after relocation.
@@ -127,8 +132,8 @@ pub fn print_fdt_information(
     memory_regions: &mut [MemoryRegion],
     reserved_regions: &mut [MemoryRegion],
 ) {
-    let memory_region_count = fdt.memory_regions(memory_regions);
-    let reserved_region_count = fdt.reserved_regions(reserved_regions);
+    let memory_region_count = dtb_memory_regions(fdt, memory_regions);
+    let reserved_region_count = dtb_reserved_regions(fdt, reserved_regions);
 
     let mut index = 0usize;
     while index < memory_region_count {

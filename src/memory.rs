@@ -11,7 +11,11 @@
 use core::arch::asm;
 use core::cmp::{max, min};
 
-use crate::dtb_read::{Fdt, MemoryRegion};
+use crate::dtb_memory::{
+    memory_regions as dtb_memory_regions, reserve_original_fdt,
+    reserved_regions as dtb_reserved_regions, MemoryRegion,
+};
+use crate::dtb_read::Fdt;
 
 unsafe extern "C" {
     /// Linker-defined start of the firmware text and rodata range.
@@ -201,8 +205,8 @@ impl<'a> PageAllocator<'a> {
         reserved_regions: &mut [MemoryRegion],
         descriptors: &'a mut [EFI_MEMORY_DESCRIPTOR],
     ) -> Result<Self, MemoryError> {
-        let memory_region_count = fdt.memory_regions(memory_regions);
-        let reserved_region_count = fdt.reserved_regions(reserved_regions);
+        let memory_region_count = dtb_memory_regions(fdt, memory_regions);
+        let reserved_region_count = dtb_reserved_regions(fdt, reserved_regions);
         let mut allocator = Self {
             descriptors,
             descriptor_count: 0,
@@ -213,7 +217,7 @@ impl<'a> PageAllocator<'a> {
         }
 
         allocator.coalesce();
-        fdt.reserve_in(&mut allocator)?;
+        reserve_original_fdt(fdt, &mut allocator)?;
 
         for region in &reserved_regions[..reserved_region_count] {
             allocator.add_reserved_region(*region)?;

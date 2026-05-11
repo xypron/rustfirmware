@@ -124,6 +124,10 @@ mod memory {
 }
 
 #[allow(dead_code)]
+#[path = "../dtb_read.rs"]
+mod dtb_read;
+
+#[allow(dead_code)]
 #[path = "../dtb_write.rs"]
 mod dtb_write;
 
