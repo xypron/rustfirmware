@@ -1,18 +1,18 @@
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
+
 //! Host-side GPT fixture validation binary.
 //!
 //! This tool loads minimal GPT disk images from `tests/data`, applies the
 //! shared parser in `src/gpt.rs`, and verifies the expected parse outcome for
 //! each fixture.
 
-use std::env;
-use std::error::Error;
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "none")]
+use core::panic::PanicInfo;
 
+/// Minimal host-side block-device shim used by the shared GPT parser.
+#[cfg(not(target_os = "none"))]
 mod virtio {
-    //! Minimal host-side block-device shim used by the shared GPT parser.
-
     /// Sector size used by the GPT parser.
     pub const VIRTIO_SECTOR_SIZE: usize = 512;
 
@@ -35,16 +35,27 @@ mod virtio {
     }
 }
 
+#[cfg(not(target_os = "none"))]
 #[path = "../partition.rs"]
 mod partition;
 
+#[cfg(not(target_os = "none"))]
 #[allow(dead_code)]
 #[path = "../gpt.rs"]
 mod gpt;
 
-use gpt::GptPartitionTable;
-use partition::{PartitionEntry, PartitionTable};
-use virtio::{BlockDevice, VIRTIO_SECTOR_SIZE, VirtioError};
+/// Host-side GPT fixture validation implementation.
+#[cfg(not(target_os = "none"))]
+mod host {
+use std::env;
+use std::error::Error;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use crate::gpt::GptPartitionTable;
+use crate::partition::{PartitionEntry, PartitionTable};
+use crate::virtio::{BlockDevice, VIRTIO_SECTOR_SIZE, VirtioError};
 
 /// Directory containing minimal GPT image fixtures.
 const DEFAULT_FIXTURE_DIR: &str = "tests/data";
@@ -133,7 +144,7 @@ impl BlockDevice for FileBlockDevice {
 }
 
 /// Runs the host-side GPT fixture validation flow.
-fn main() -> Result<(), Box<dyn Error>> {
+pub fn run() -> Result<(), Box<dyn Error>> {
     match parse_mode()? {
         TestMode::AllFixtures => run_all_fixtures(),
         TestMode::SinglePath(path) => run_one_case(&path),
@@ -331,4 +342,30 @@ fn verify_expected_partition<E: PartitionEntry>(
     }
 
     Ok(())
+}
+}
+
+/// Runs the host-side GPT fixture validation binary on hosted targets.
+#[cfg(not(target_os = "none"))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    host::run()
+}
+
+/// Handles unrecoverable failures for the freestanding stub build.
+#[cfg(target_os = "none")]
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Provides a no-op entry point so this host-only binary still links for the
+/// firmware target.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+extern "C" fn _start() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
 }

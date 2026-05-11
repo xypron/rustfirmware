@@ -174,7 +174,7 @@ fn read_header_at<D: BlockDevice>(device: &mut D, header_lba: u64) -> Option<Gpt
     }
 
     let entry_array_crc = read_u32(&sector, GPT_PARTITION_ENTRY_ARRAY_CRC_OFFSET)?;
-    if entry_array_crc != validate_entry_array_crc(device, partition_entry_lba, entry_array_bytes, entry_array_crc)? {
+    if !verify_entry_array_crc(device, partition_entry_lba, entry_array_bytes, entry_array_crc) {
         return None;
     }
 
@@ -185,32 +185,35 @@ fn read_header_at<D: BlockDevice>(device: &mut D, header_lba: u64) -> Option<Gpt
     })
 }
 
-/// Computes the CRC32 of the GPT entry array and returns it.
-fn validate_entry_array_crc<D: BlockDevice>(
+/// Returns `true` when the GPT entry array CRC matches `expected_crc`.
+fn verify_entry_array_crc<D: BlockDevice>(
     device: &mut D,
     start_lba: u64,
     byte_len: u64,
     expected_crc: u32,
-) -> Option<u32> {
+) -> bool {
     let mut sector = [0u8; VIRTIO_SECTOR_SIZE];
     let mut current_lba = start_lba;
-    let mut remaining = usize::try_from(byte_len).ok()?;
+    let mut remaining = match usize::try_from(byte_len) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
     let mut crc = 0xffff_ffff;
 
     while remaining != 0 {
-        device.read_blocks(current_lba, &mut sector).ok()?;
+        if device.read_blocks(current_lba, &mut sector).is_err() {
+            return false;
+        }
         let take = min(remaining, VIRTIO_SECTOR_SIZE);
         crc = crc32_update(crc, &sector[..take]);
         remaining -= take;
-        current_lba = current_lba.checked_add(1)?;
+        current_lba = match current_lba.checked_add(1) {
+            Some(value) => value,
+            None => return false,
+        };
     }
 
-    let computed = crc32_finalize(crc);
-    if computed == expected_crc {
-        Some(computed)
-    } else {
-        None
-    }
+    crc32_finalize(crc) == expected_crc
 }
 
 /// Reads one GPT partition entry by index.
@@ -231,12 +234,16 @@ pub fn read_partition_entry<D: BlockDevice>(
 
     let mut sectors = [0u8; GPT_ENTRY_READ_BUFFER_SIZE];
     let entry_size = header.partition_entry_size as usize;
-    let entry_offset = index as usize * entry_size;
-    let sector_lba = header.partition_entry_lba + (entry_offset / VIRTIO_SECTOR_SIZE) as u64;
+    let entry_offset = (index as usize).checked_mul(entry_size)?;
+    let sector_lba = header.partition_entry_lba
+        .checked_add((entry_offset / VIRTIO_SECTOR_SIZE) as u64)?;
     let sector_offset = entry_offset % VIRTIO_SECTOR_SIZE;
 
     let sectors_to_read = required_entry_sectors(sector_offset)?;
     let bytes_to_read = sectors_to_read * VIRTIO_SECTOR_SIZE;
+    if bytes_to_read > sectors.len() {
+        return None;
+    }
 
     device.read_blocks(sector_lba, &mut sectors[..bytes_to_read]).ok()?;
     let entry = &sectors[sector_offset..sector_offset + GPT_ENTRY_MIN_SIZE];
@@ -249,14 +256,20 @@ pub fn read_partition_entry<D: BlockDevice>(
         name_index += 1;
     }
 
-    Some(GptPartitionEntry {
+    let partition = GptPartitionEntry {
         partition_type_guid: copy_16(entry, 0)?,
         unique_partition_guid: copy_16(entry, 16)?,
         first_lba: read_u64(entry, 32)?,
         last_lba: read_u64(entry, 40)?,
         attributes: read_u64(entry, 48)?,
         partition_name,
-    })
+    };
+
+    if partition.first_lba > partition.last_lba || partition.last_lba >= device.sector_count() {
+        return None;
+    }
+
+    Some(partition)
 }
 
 /// Returns the number of sectors that must be read to decode one GPT entry.
@@ -277,7 +290,9 @@ impl GptPartitionEntry {
 
     /// Returns the number of sectors covered by the partition.
     pub fn sector_count(&self) -> u64 {
-        self.last_lba - self.first_lba + 1
+        self.last_lba
+            .saturating_sub(self.first_lba)
+            .saturating_add(1)
     }
 
     /// Returns `true` when the legacy BIOS bootable attribute is set.
@@ -307,6 +322,8 @@ impl GptPartitionEntry {
             out = 1;
         }
 
+        // SAFETY: `buffer[..out]` contains only ASCII bytes written above,
+        // so it is always valid UTF-8.
         unsafe { str::from_utf8_unchecked(&buffer[..out]) }
     }
 
@@ -361,6 +378,8 @@ impl GptPartitionEntry {
             src += 1;
         }
 
+        // SAFETY: `buffer[..out]` contains only ASCII hex digits and dashes,
+        // so it is always valid UTF-8.
         unsafe { str::from_utf8_unchecked(&buffer[..out]) }
     }
 }
