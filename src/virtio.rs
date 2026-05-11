@@ -93,6 +93,8 @@ const VIRTIO_BLK_STATUS_OK: u8 = 0;
 const VIRTIO_BLOCK_QUEUE: u32 = 0;
 /// Queue size provisioned for the polling block driver.
 const VIRTIO_BLOCK_QUEUE_SIZE: u16 = 4;
+/// Maximum completion-poll iterations before one block request times out.
+const VIRTIO_BLOCK_REQUEST_POLL_LIMIT: usize = 10_000_000;
 
 /// Virtqueue descriptor flag indicating a continuation descriptor.
 pub const VIRTQ_DESC_F_NEXT: u16 = 1;
@@ -121,6 +123,10 @@ pub enum VirtioError {
     QueueCreationFailed,
     /// The caller supplied a buffer whose length is not a whole number of sectors.
     InvalidBufferLength,
+    /// The device did not complete a request before the polling limit expired.
+    RequestTimeout,
+    /// The device returned an unexpected descriptor head in the used ring.
+    UnexpectedUsedId(u32),
     /// The device completed a block request with a non-zero status byte.
     BlockRequestFailed(u8),
 }
@@ -206,7 +212,12 @@ pub struct VirtioBlockDriver {
 impl VirtioMmioDevice {
     /// Creates an MMIO transport handle from a raw base address.
     ///
-    /// The caller must ensure that `base` points at a valid VirtIO MMIO region.
+    /// # Safety
+    ///
+    /// The caller must ensure that `base` points at a valid, mapped VirtIO
+    /// MMIO register region with the expected alignment and lifetime, and that
+    /// no conflicting aliasing transport handle is used to mutate the same
+    /// device concurrently.
     ///
     /// # Parameters
     ///
@@ -406,10 +417,16 @@ impl VirtioMmioDevice {
     }
 
     fn read_reg(&self, offset: usize) -> u32 {
+        // SAFETY: `self.base` was constructed from a valid VirtIO MMIO region,
+        // and all callers use register offsets within that mapped register
+        // block.
         unsafe { ptr::read_volatile(self.register_ptr(offset)) }
     }
 
     fn write_reg(&self, offset: usize, value: u32) {
+        // SAFETY: `self.base` was constructed from a valid VirtIO MMIO region,
+        // and all callers use register offsets within that mapped register
+        // block.
         unsafe { ptr::write_volatile(self.register_mut_ptr(offset), value) }
     }
 
@@ -459,8 +476,11 @@ pub fn qemu_virt_block_devices() -> QemuVirtBlockDevices {
 
 /// Probes the QEMU MMIO slots and returns the first block device, if present.
 ///
-/// The caller must ensure that probing fixed QEMU MMIO addresses is valid in the
-/// current machine configuration.
+/// # Safety
+///
+/// The caller must ensure that probing fixed QEMU MMIO addresses is valid in
+/// the current machine configuration and that the returned transport handle is
+/// not used concurrently with other mutable access paths.
 pub unsafe fn probe_qemu_virt_block_device() -> Option<VirtioMmioDevice> {
     qemu_virt_block_devices().next().map(|probe| probe.device)
 }
@@ -468,8 +488,12 @@ pub unsafe fn probe_qemu_virt_block_device() -> Option<VirtioMmioDevice> {
 impl VirtioBlockDriver {
     /// Initializes a minimal polling block driver for a VirtIO MMIO block device.
     ///
+    /// # Safety
+    ///
     /// The caller must ensure that only one instance uses the shared static
-    /// queue/request storage at a time.
+    /// queue/request storage at a time. This firmware only runs one hart
+    /// through the block-driver path, so the shared statics remain single-
+    /// threaded as long as callers uphold that one-driver-at-a-time contract.
     ///
     /// # Parameters
     ///
@@ -509,10 +533,14 @@ impl VirtioBlockDriver {
             return Err(VirtioError::QueueTooSmall);
         }
 
+        // SAFETY: `queue_base` points at the dedicated shared 4 KiB queue page,
+        // which is valid and uniquely used by this driver instance.
         unsafe {
             ptr::write_bytes(queue_base, 0, 4096);
         }
 
+        // SAFETY: `queue_base` points at writable queue memory large enough for
+        // `queue_layout`, validated against the dedicated 4 KiB backing page.
         let queue = unsafe { VirtQueue::from_ptr(queue_base, VIRTIO_BLOCK_QUEUE_SIZE, false) }
             .ok_or(VirtioError::QueueCreationFailed)?;
 
@@ -547,6 +575,8 @@ impl BlockDevice for VirtioBlockDriver {
 
         let buffer_len = u32::try_from(buffer.len()).map_err(|_| VirtioError::InvalidBufferLength)?;
 
+        // SAFETY: The shared request header/status storage is exclusively owned
+        // by this single active driver instance while the request is in flight.
         unsafe {
             ptr::write(
                 ptr::addr_of_mut!(VIRTIO_BLOCK_REQUEST_HEADER),
@@ -595,12 +625,24 @@ impl BlockDevice for VirtioBlockDriver {
         fence(Ordering::SeqCst);
         self.device.notify_queue(VIRTIO_BLOCK_QUEUE);
 
+        let mut spins = 0usize;
         while self.queue.used_idx() == self.used_idx {
+            if spins == VIRTIO_BLOCK_REQUEST_POLL_LIMIT {
+                return Err(VirtioError::RequestTimeout);
+            }
+            spins += 1;
             core::hint::spin_loop();
         }
 
-        self.used_idx = self.used_idx.wrapping_add(1);
         fence(Ordering::SeqCst);
+
+        let used_slot = self.used_idx % VIRTIO_BLOCK_QUEUE_SIZE;
+        let used_elem = self.queue.used_elem(used_slot);
+        if used_elem.id != 0 {
+            return Err(VirtioError::UnexpectedUsedId(used_elem.id));
+        }
+
+        self.used_idx = self.used_idx.wrapping_add(1);
 
         let status = unsafe { ptr::read_volatile(ptr::addr_of!(VIRTIO_BLOCK_REQUEST_STATUS)) };
         if status == VIRTIO_BLK_STATUS_OK {
@@ -660,6 +702,9 @@ impl VirtQueueLayout {
     /// - `queue_size`: Number of descriptors in the queue.
     /// - `event_idx`: Whether event index fields should be included.
     pub const fn new(queue_size: u16, event_idx: bool) -> Self {
+        // This helper is only used with small VirtIO queue sizes. The current
+        // block driver provisions four descriptors, well below any arithmetic
+        // overflow boundary for these layout calculations.
         let desc_offset = 0;
         let desc_size = mem::size_of::<VirtqDescriptor>() * queue_size as usize;
         let avail_offset = desc_offset + desc_size;
@@ -694,8 +739,11 @@ impl VirtQueue {
 
     /// Creates a queue accessor from a raw guest-memory pointer.
     ///
+    /// # Safety
+    ///
     /// The caller must ensure that `base` points at writable guest memory large
-    /// enough for the requested queue layout.
+    /// enough for the requested queue layout, with alignment suitable for the
+    /// descriptor table and ring structures derived from it.
     pub unsafe fn from_ptr(base: *mut u8, queue_size: u16, event_idx: bool) -> Option<Self> {
         Some(Self {
             base: NonNull::new(base)?,
@@ -900,6 +948,9 @@ impl VirtQueue {
     }
 
     fn descriptor_ptr(&self, index: u16) -> *const VirtqDescriptor {
+        // SAFETY: Debug assertions constrain `index` to the configured queue
+        // size, and `self.base` points at queue memory large enough for the
+        // precomputed layout.
         unsafe { self.base.as_ptr().add(self.layout.desc_offset + index as usize * mem::size_of::<VirtqDescriptor>()) as *const VirtqDescriptor }
     }
 
@@ -908,6 +959,8 @@ impl VirtQueue {
     }
 
     fn avail_flags_ptr(&self) -> *const u16 {
+        // SAFETY: `self.base` points at queue memory large enough for the
+        // precomputed layout, including the available ring header.
         unsafe { self.base.as_ptr().add(self.layout.avail_offset) as *const u16 }
     }
 
@@ -916,6 +969,8 @@ impl VirtQueue {
     }
 
     fn avail_idx_ptr(&self) -> *const u16 {
+        // SAFETY: `self.base` points at queue memory large enough for the
+        // precomputed layout, including the available ring header.
         unsafe { self.base.as_ptr().add(self.layout.avail_offset + 2) as *const u16 }
     }
 
@@ -924,6 +979,8 @@ impl VirtQueue {
     }
 
     fn avail_ring_ptr(&self, slot: u16) -> *const u16 {
+        // SAFETY: Debug assertions constrain `slot` to the queue size, and the
+        // precomputed layout reserves space for every available-ring entry.
         unsafe { self.base.as_ptr().add(self.layout.avail_offset + 4 + slot as usize * 2) as *const u16 }
     }
 
@@ -932,6 +989,8 @@ impl VirtQueue {
     }
 
     fn used_flags_ptr(&self) -> *const u16 {
+        // SAFETY: `self.base` points at queue memory large enough for the
+        // precomputed layout, including the used ring header.
         unsafe { self.base.as_ptr().add(self.layout.used_offset) as *const u16 }
     }
 
@@ -940,6 +999,8 @@ impl VirtQueue {
     }
 
     fn used_idx_ptr(&self) -> *const u16 {
+        // SAFETY: `self.base` points at queue memory large enough for the
+        // precomputed layout, including the used ring header.
         unsafe { self.base.as_ptr().add(self.layout.used_offset + 2) as *const u16 }
     }
 
@@ -948,6 +1009,8 @@ impl VirtQueue {
     }
 
     fn used_ring_ptr(&self, slot: u16) -> *const VirtqUsedElem {
+        // SAFETY: Debug assertions constrain `slot` to the queue size, and the
+        // precomputed layout reserves space for every used-ring entry.
         unsafe {
             self.base.as_ptr().add(self.layout.used_offset + 4 + slot as usize * mem::size_of::<VirtqUsedElem>())
                 as *const VirtqUsedElem
@@ -959,6 +1022,8 @@ impl VirtQueue {
     }
 
     fn used_event_ptr(&self) -> *const u16 {
+        // SAFETY: This field is only used when EVENT_IDX is enabled, and the
+        // precomputed layout includes its trailing available-ring storage.
         unsafe { self.base.as_ptr().add(self.layout.avail_offset + 4 + self.queue_size() as usize * 2) as *const u16 }
     }
 
@@ -967,6 +1032,8 @@ impl VirtQueue {
     }
 
     fn avail_event_ptr(&self) -> *const u16 {
+        // SAFETY: This field is only used when EVENT_IDX is enabled, and the
+        // precomputed layout includes its trailing used-ring storage.
         unsafe {
             self.base.as_ptr().add(
                 self.layout.used_offset + 4 + self.queue_size() as usize * mem::size_of::<VirtqUsedElem>(),
