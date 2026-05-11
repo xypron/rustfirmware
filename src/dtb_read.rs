@@ -117,6 +117,54 @@ impl<'a> Fdt<'a> {
         self.node_at_offset(0)
     }
 
+    /// Finds one direct child node of `parent` by name.
+    ///
+    /// # Parameters
+    ///
+    /// - `parent`: Parent node whose direct children should be searched.
+    /// - `name`: Name of the direct child node to find.
+    pub fn find_child(&self, parent: FdtNode<'a>, name: &str) -> Option<FdtNode<'a>> {
+        let mut result = None;
+
+        self.for_each_child(parent, |child| {
+            if child.name == name {
+                result = Some(child);
+                return false;
+            }
+
+            true
+        });
+
+        result
+    }
+
+    /// Finds one node by absolute device-tree path.
+    ///
+    /// # Parameters
+    ///
+    /// - `path`: Absolute device-tree path such as `/chosen`.
+    pub fn find_node(&self, path: &str) -> Option<FdtNode<'a>> {
+        if path == "/" {
+            return self.root_node();
+        }
+
+        let mut components = path.split('/');
+        if components.next()? != "" {
+            return None;
+        }
+
+        let mut node = self.root_node()?;
+        for component in components {
+            if component.is_empty() {
+                return None;
+            }
+
+            node = self.find_child(node, component)?;
+        }
+
+        Some(node)
+    }
+
     /// Visits each direct child of `parent` in structure-block order.
     ///
     /// Returning `false` from `visit` stops the iteration early.
@@ -173,7 +221,11 @@ impl<'a> Fdt<'a> {
     ///
     /// - `node`: Node whose direct properties should be searched.
     /// - `property_name`: Name of the property to look up.
-    pub fn property(&self, node: FdtNode<'a>, property_name: &str) -> Option<&'a [u8]> {
+    pub fn get_property(
+        &self,
+        node: FdtNode<'a>,
+        property_name: &str,
+    ) -> Option<&'a [u8]> {
         let mut offset = self.after_begin_node(node.begin_offset)?;
 
         while offset < node.end_offset {
@@ -202,37 +254,48 @@ impl<'a> Fdt<'a> {
         None
     }
 
-    /// Visits each decoded reserve-map entry in header order.
-    ///
-    /// Returning `false` from `visit` stops the iteration early.
+    /// Returns one 32-bit property value decoded from big-endian cells.
     ///
     /// # Parameters
     ///
-    /// - `visit`: Callback invoked once for each decoded reserve-map entry.
-    pub fn for_each_reserve_entry(
+    /// - `node`: Node that owns the property.
+    /// - `property_name`: Name of the property to decode.
+    pub fn get_property_u32(
         &self,
-        mut visit: impl FnMut(FdtReserveEntry) -> bool,
-    ) {
-        let mut offset = 0usize;
+        node: FdtNode<'a>,
+        property_name: &str,
+    ) -> Option<u32> {
+        read_be_u32_from_slice(self.get_property(node, property_name)?, 0)
+    }
 
-        loop {
-            let Some(address) = read_be_u64_from_slice(self.reserve_map, offset) else {
-                break;
-            };
-            let Some(size) = read_be_u64_from_slice(self.reserve_map, offset + 8) else {
-                break;
-            };
+    /// Returns one 64-bit property value decoded from big-endian cells.
+    ///
+    /// # Parameters
+    ///
+    /// - `node`: Node that owns the property.
+    /// - `property_name`: Name of the property to decode.
+    pub fn get_property_u64(
+        &self,
+        node: FdtNode<'a>,
+        property_name: &str,
+    ) -> Option<u64> {
+        read_be_u64_from_slice(self.get_property(node, property_name)?, 0)
+    }
 
-            if address == 0 && size == 0 {
-                break;
-            }
-
-            if !visit(FdtReserveEntry { address, size }) {
-                break;
-            }
-
-            offset += 16;
-        }
+    /// Returns one NUL-terminated UTF-8 property string.
+    ///
+    /// # Parameters
+    ///
+    /// - `node`: Node that owns the property.
+    /// - `property_name`: Name of the property to decode.
+    pub fn get_property_string(
+        &self,
+        node: FdtNode<'a>,
+        property_name: &str,
+    ) -> Option<&'a str> {
+        let property = self.get_property(node, property_name)?;
+        let end = property.iter().position(|byte| *byte == 0)?;
+        str::from_utf8(&property[..end]).ok()
     }
 
     /// Returns the raw start pointer of the validated FDT blob.
@@ -251,6 +314,22 @@ impl<'a> Fdt<'a> {
     /// This function does not accept parameters.
     pub(crate) fn total_size_bytes(&self) -> usize {
         self.total_size
+    }
+
+    /// Returns one decoded reserve-map entry by index.
+    ///
+    /// # Parameters
+    ///
+    /// - `index`: Zero-based index of the reserve-map entry to decode.
+    pub(crate) fn reserve_entry(&self, index: usize) -> Option<FdtReserveEntry> {
+        let offset = index.checked_mul(16)?;
+        let address = read_be_u64_from_slice(self.reserve_map, offset)?;
+        let size = read_be_u64_from_slice(self.reserve_map, offset + 8)?;
+        if address == 0 && size == 0 {
+            return None;
+        }
+
+        Some(FdtReserveEntry { address, size })
     }
 
     /// Builds one validated node view from a structure-block offset.

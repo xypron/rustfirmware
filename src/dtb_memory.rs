@@ -5,7 +5,7 @@
 //! regions from both the reserve map and `/reserved-memory`, and reserves the
 //! original FDT blob in the EFI-style allocator.
 
-use crate::dtb_read::{read_be_u32_from_slice, read_cells, Fdt, FdtNode};
+use crate::dtb_read::{read_cells, Fdt};
 use crate::memory::{MemoryError, PageAllocator};
 
 /// One memory or reserved-memory range decoded from an FDT.
@@ -45,8 +45,8 @@ pub fn memory_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
         return 0;
     };
 
-    let root_address_cells = property_u32(fdt, root, "#address-cells").unwrap_or(2);
-    let root_size_cells = property_u32(fdt, root, "#size-cells").unwrap_or(1);
+    let root_address_cells = fdt.get_property_u32(root, "#address-cells").unwrap_or(2);
+    let root_size_cells = fdt.get_property_u32(root, "#size-cells").unwrap_or(1);
     let mut count = 0usize;
 
     fdt.for_each_child(root, |node| {
@@ -58,13 +58,13 @@ pub fn memory_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
             return true;
         }
 
-        if let Some(device_type) = fdt.property(node, "device_type") {
-            if device_type != b"memory\0" {
+        if let Some(device_type) = fdt.get_property_string(node, "device_type") {
+            if device_type != "memory" {
                 return true;
             }
         }
 
-        if let Some(reg) = fdt.property(node, "reg") {
+        if let Some(reg) = fdt.get_property(node, "reg") {
             count += decode_regions(
                 reg,
                 root_address_cells as usize,
@@ -91,14 +91,13 @@ pub fn reserved_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
         return 0;
     };
 
-    let root_address_cells = property_u32(fdt, root, "#address-cells").unwrap_or(2);
-    let root_size_cells = property_u32(fdt, root, "#size-cells").unwrap_or(1);
+    let root_address_cells = fdt.get_property_u32(root, "#address-cells").unwrap_or(2);
+    let root_size_cells = fdt.get_property_u32(root, "#size-cells").unwrap_or(1);
 
     let mut count = reserve_map_regions(fdt, output);
     if count < output.len() {
         count += reserved_memory_regions(
             fdt,
-            root,
             root_address_cells,
             root_size_cells,
             &mut output[count..],
@@ -116,9 +115,9 @@ pub fn reserved_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
 fn reserve_map_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
     let mut count = 0usize;
 
-    fdt.for_each_reserve_entry(|entry| {
+    while let Some(entry) = fdt.reserve_entry(count) {
         if count == output.len() {
-            return false;
+            break;
         }
 
         output[count] = MemoryRegion {
@@ -126,8 +125,7 @@ fn reserve_map_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
             size: entry.size,
         };
         count += 1;
-        true
-    });
+    }
 
     count
 }
@@ -140,29 +138,17 @@ fn reserve_map_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
 /// - `output`: Destination slice that receives decoded reserved ranges.
 fn reserved_memory_regions(
     fdt: &Fdt<'_>,
-    root: FdtNode<'_>,
     root_address_cells: u32,
     root_size_cells: u32,
     output: &mut [MemoryRegion],
 ) -> usize {
-    let mut reserved_node = None;
-
-    fdt.for_each_child(root, |node| {
-        if node.name == "reserved-memory" {
-            reserved_node = Some(node);
-            return false;
-        }
-
-        true
-    });
-
-    let Some(reserved_node) = reserved_node else {
+    let Some(reserved_node) = fdt.find_node("/reserved-memory") else {
         return 0;
     };
 
-    let address_cells = property_u32(fdt, reserved_node, "#address-cells")
+    let address_cells = fdt.get_property_u32(reserved_node, "#address-cells")
         .unwrap_or(root_address_cells) as usize;
-    let size_cells = property_u32(fdt, reserved_node, "#size-cells")
+    let size_cells = fdt.get_property_u32(reserved_node, "#size-cells")
         .unwrap_or(root_size_cells) as usize;
     let mut count = 0usize;
 
@@ -171,7 +157,7 @@ fn reserved_memory_regions(
             return false;
         }
 
-        if let Some(reg) = fdt.property(node, "reg") {
+        if let Some(reg) = fdt.get_property(node, "reg") {
             count += decode_regions(reg, address_cells, size_cells, &mut output[count..]);
         }
 
@@ -179,18 +165,6 @@ fn reserved_memory_regions(
     });
 
     count
-}
-
-/// Returns one 32-bit property value when the property is present and valid.
-///
-/// # Parameters
-///
-/// - `fdt`: Flattened device tree supplying the property bytes.
-/// - `node`: Node that owns the property.
-/// - `property_name`: Name of the property to decode.
-fn property_u32(fdt: &Fdt<'_>, node: FdtNode<'_>, property_name: &str) -> Option<u32> {
-    let property = fdt.property(node, property_name)?;
-    read_be_u32_from_slice(property, 0)
 }
 
 /// Decodes one `reg` property payload into `output`.

@@ -211,14 +211,8 @@ struct NodeLocation {
 struct PropertyLocation {
     /// Absolute byte offset of the property's `FDT_PROP` token.
     property_offset: usize,
-    /// Absolute byte offset of the property's value payload.
-    value_offset: usize,
-    /// Length of the property's value payload in bytes.
-    value_length: usize,
     /// Total encoded property length, including token, header, and padding.
     total_length: usize,
-    /// Offset of the property name within the strings block.
-    name_offset: u32,
 }
 
 /// Boot-oriented device-tree object passed to boot methods.
@@ -422,7 +416,17 @@ impl Dtb {
         property_name: &str,
         value: &str,
     ) -> Result<(), DtbError> {
-        self.set_property_with_zero(node_path, property_name, value.as_bytes())
+        let mut property_bytes = [0u8; 256];
+        let property_len = value
+            .len()
+            .checked_add(1)
+            .ok_or(DtbError::SizeOverflow)?;
+        if property_len > property_bytes.len() {
+            return Err(DtbError::BufferTooSmall);
+        }
+
+        property_bytes[..value.len()].copy_from_slice(value.as_bytes());
+        self.set_property_bytes(node_path, property_name, &property_bytes[..property_len])
     }
 
     /// Inserts one 32-bit big-endian value into the DTB buffer.
@@ -502,14 +506,14 @@ impl Dtb {
         Ok(end)
     }
 
-    /// Creates or replaces one property with an appended zero byte.
+    /// Creates or replaces one property payload exactly as provided.
     ///
     /// # Parameters
     ///
     /// - `node_path`: Absolute device-tree path of the target node.
     /// - `property_name`: Name of the property to create or replace.
-    /// - `value`: Property payload written before the trailing zero byte.
-    fn set_property_with_zero(
+    /// - `value`: Property payload bytes.
+    fn set_property_bytes(
         &mut self,
         node_path: &str,
         property_name: &str,
@@ -517,37 +521,15 @@ impl Dtb {
     ) -> Result<(), DtbError> {
         let node = self.find_node(node_path)?;
         let name_offset = self.find_or_add_string(property_name)?;
-        let record_offset = match self.find_direct_property(node, property_name)? {
-            Some(existing) => {
-                let record_length = property_record_length(value.len() + 1)?;
-                self.splice_struct_placeholder(
-                    existing.property_offset,
-                    existing.total_length,
-                    record_length,
-                )?;
-                existing.property_offset
-            }
-            None => {
-                let insertion_offset = self.property_insertion_offset(node)?;
-                let record_length = property_record_length(value.len() + 1)?;
-                self.splice_struct_placeholder(insertion_offset, 0, record_length)?;
-                insertion_offset
-            }
-        };
+        let record_offset = self.prepare_property_record(node, property_name, value.len())?;
 
         self.insert_u32(record_offset, FDT_PROP)?;
-        let stored_length = value
-            .len()
-            .checked_add(1)
-            .ok_or(DtbError::SizeOverflow)
-            .and_then(|length| {
-                u32::try_from(length).map_err(|_| DtbError::SizeOverflow)
-            })?;
+        let stored_length =
+            u32::try_from(value.len()).map_err(|_| DtbError::SizeOverflow)?;
         self.insert_u32(record_offset + 4, stored_length)?;
         self.insert_u32(record_offset + 8, name_offset)?;
         self.insert_bytes(record_offset + 12, value)?;
-        self.insert_bytes(record_offset + 12 + value.len(), &[0])?;
-        self.zero_property_padding(record_offset, value.len() + 1)?;
+        self.zero_property_padding(record_offset, value.len())?;
         Ok(())
     }
 
@@ -564,34 +546,7 @@ impl Dtb {
         property_name: &str,
         value: &[u8],
     ) -> Result<(), DtbError> {
-        let node = self.find_node(node_path)?;
-        let name_offset = self.find_or_add_string(property_name)?;
-        let record_offset = match self.find_direct_property(node, property_name)? {
-            Some(existing) => {
-                let record_length = property_record_length(value.len())?;
-                self.splice_struct_placeholder(
-                    existing.property_offset,
-                    existing.total_length,
-                    record_length,
-                )?;
-                existing.property_offset
-            }
-            None => {
-                let insertion_offset = self.property_insertion_offset(node)?;
-                let record_length = property_record_length(value.len())?;
-                self.splice_struct_placeholder(insertion_offset, 0, record_length)?;
-                insertion_offset
-            }
-        };
-
-        self.insert_u32(record_offset, FDT_PROP)?;
-        let stored_length =
-            u32::try_from(value.len()).map_err(|_| DtbError::SizeOverflow)?;
-        self.insert_u32(record_offset + 4, stored_length)?;
-        self.insert_u32(record_offset + 8, name_offset)?;
-        self.insert_bytes(record_offset + 12, value)?;
-        self.zero_property_padding(record_offset, value.len())?;
-        Ok(())
+        self.set_property_bytes(node_path, property_name, value)
     }
 
     /// Returns the root node from the structure block.
@@ -758,15 +713,11 @@ impl Dtb {
                 FDT_PROP => {
                     let value_length = self.read_token(offset + 4)? as usize;
                     let name_offset = self.read_token(offset + 8)?;
-                    let value_offset = offset + 12;
                     let total_length = property_record_length(value_length)?;
                     if self.name_at(name_offset as usize)? == property_name {
                         return Ok(Some(PropertyLocation {
                             property_offset: offset,
-                            value_offset,
-                            value_length,
                             total_length,
-                            name_offset,
                         }));
                     }
                     offset += total_length;
@@ -781,6 +732,39 @@ impl Dtb {
         }
 
         Ok(None)
+    }
+
+    /// Ensures that the structure block contains one property record of the
+    /// requested size and returns its starting offset.
+    ///
+    /// # Parameters
+    ///
+    /// - `node`: Node that will own the property.
+    /// - `property_name`: Property name to replace or insert.
+    /// - `value_length`: Final property payload length in bytes.
+    fn prepare_property_record(
+        &mut self,
+        node: NodeLocation,
+        property_name: &str,
+        value_length: usize,
+    ) -> Result<usize, DtbError> {
+        match self.find_direct_property(node, property_name)? {
+            Some(existing) => {
+                let record_length = property_record_length(value_length)?;
+                self.splice_struct_placeholder(
+                    existing.property_offset,
+                    existing.total_length,
+                    record_length,
+                )?;
+                Ok(existing.property_offset)
+            }
+            None => {
+                let insertion_offset = self.property_insertion_offset(node)?;
+                let record_length = property_record_length(value_length)?;
+                self.splice_struct_placeholder(insertion_offset, 0, record_length)?;
+                Ok(insertion_offset)
+            }
+        }
     }
 
     /// Returns the insertion point for a new direct property.
