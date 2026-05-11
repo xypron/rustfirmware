@@ -6,7 +6,7 @@
 //! original FDT blob in the EFI-style allocator.
 
 use crate::dtb_read::{read_cells, Fdt};
-use crate::memory::{MemoryError, PageAllocator};
+use crate::memory::{EFI_MEMORY_TYPE, MemoryError, PageAllocator};
 
 /// One memory or reserved-memory range decoded from an FDT.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,11 +36,14 @@ pub fn reserve_original_fdt(
     fdt: &Fdt<'_>,
     allocator: &mut PageAllocator<'_>,
 ) -> Result<(), MemoryError> {
-    allocator.reserve_region(MemoryRegion {
-        base: fdt.base_ptr() as u64,
-        size: u64::try_from(fdt.total_size_bytes())
-            .map_err(|_| MemoryError::AddressOverflow)?,
-    })
+    allocator.reserve_region_with_type(
+        MemoryRegion {
+            base: fdt.base_ptr() as u64,
+            size: u64::try_from(fdt.total_size_bytes())
+                .map_err(|_| MemoryError::AddressOverflow)?,
+        },
+        EFI_MEMORY_TYPE::EfiACPIReclaimMemory,
+    )
 }
 
 /// Collects memory ranges from `/memory` nodes into `output`.

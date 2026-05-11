@@ -365,13 +365,19 @@ impl<'a> PageAllocator<'a> {
         &self.descriptors[..self.descriptor_count]
     }
 
-    /// Reserves one region in the current EFI-style memory map.
+    /// Reserves one region in the current EFI-style memory map with an
+    /// explicit EFI memory type.
     ///
     /// # Parameters
     ///
     /// - `region`: Region to carve from conventional memory.
-    pub fn reserve_region(&mut self, region: MemoryRegion) -> Result<(), MemoryError> {
-        self.add_reserved_region(region)?;
+    /// - `memory_type`: EFI memory type assigned to the carved range.
+    pub fn reserve_region_with_type(
+        &mut self,
+        region: MemoryRegion,
+        memory_type: EFI_MEMORY_TYPE,
+    ) -> Result<(), MemoryError> {
+        self.add_reserved_region_with_type(region, memory_type)?;
         self.coalesce();
         Ok(())
     }
