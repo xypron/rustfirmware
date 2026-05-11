@@ -3,4 +3,5 @@
 /test.img*
 /vmlinu*
 /initrd*
+/.vscode
 /.*.swp
