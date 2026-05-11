@@ -25,3 +25,11 @@
 - Add rustdoc comments for every module, static, constant, type alias, enum, struct, function, and method, including non-public helpers.
 - Document every function and method parameter, and document every struct field.
 - Place each rustdoc block immediately above the item it documents.
+- Do not write code that causes LLVM to emit a `.data` jump table of
+  fat-pointer pairs (e.g. a `match` expression returning `&'static str`).
+  Such tables contain absolute link-time addresses that are invalid at
+  runtime because there is no dynamic linker to apply relocations.
+  The `-Z no-jump-tables` compiler flag that would prevent this is a
+  nightly-only option and is not available on this toolchain (stable
+  Rust 1.95). Instead, structure the code so that each branch directly
+  calls `puts` or prints inline, rather than indexing into a string table.

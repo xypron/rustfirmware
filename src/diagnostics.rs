@@ -188,44 +188,48 @@ pub fn print_memory_map(
     let mut index = 0usize;
     while index < descriptor_count {
         let descriptor = memory_map[index];
-        let size_in_bytes = descriptor.NumberOfPages.saturating_mul(EFI_PAGE_SIZE);
-        crate::println!(
-            "efi-memory {}: type={}, base={:#018x}, size={:#018x}, attr={:#018x}",
-            index + 1,
-            efi_memory_type_name(descriptor),
-            descriptor.PhysicalStart as usize,
-            size_in_bytes as usize,
-            descriptor.Attribute as usize,
-        );
+        print_memory_map_line(index + 1, descriptor);
         index += 1;
     }
 }
 
-/// Returns a short diagnostics name for one EFI memory type.
+/// Prints one EFI-style memory map line with the correct type name.
+///
+/// Using separate `puts` calls for the type name avoids LLVM emitting a
+/// `.data` fat-pointer table whose entries would hold link-time-relative
+/// string addresses that are invalid at runtime.
 ///
 /// # Parameters
 ///
-/// - `descriptor`: Descriptor whose type should be formatted.
-fn efi_memory_type_name(descriptor: EFI_MEMORY_DESCRIPTOR) -> &'static str {
-    match descriptor.Type {
-        0 => "EfiReservedMemoryType",
-        1 => "EfiLoaderCode",
-        2 => "EfiLoaderData",
-        3 => "EfiBootServicesCode",
-        4 => "EfiBootServicesData",
-        5 => "EfiRuntimeServicesCode",
-        6 => "EfiRuntimeServicesData",
-        7 => "EfiConventionalMemory",
-        8 => "EfiUnusableMemory",
-        9 => "EfiACPIReclaimMemory",
-        10 => "EfiACPIMemoryNVS",
-        11 => "EfiMemoryMappedIO",
-        12 => "EfiMemoryMappedIOPortSpace",
-        13 => "EfiPalCode",
-        14 => "EfiPersistentMemory",
-        15 => "EfiUnacceptedMemoryType",
-        _ => "unknown",
-    }
+/// - `index`: One-based entry number.
+/// - `descriptor`: Descriptor to format.
+fn print_memory_map_line(index: usize, descriptor: EFI_MEMORY_DESCRIPTOR) {
+    let size_in_bytes = descriptor.NumberOfPages.saturating_mul(EFI_PAGE_SIZE);
+    crate::print!("efi-memory {}: type=", index);
+    let t = descriptor.Type;
+    if t == 0 { crate::print!("EfiReservedMemoryType"); }
+    else if t == 1 { crate::print!("EfiLoaderCode"); }
+    else if t == 2 { crate::print!("EfiLoaderData"); }
+    else if t == 3 { crate::print!("EfiBootServicesCode"); }
+    else if t == 4 { crate::print!("EfiBootServicesData"); }
+    else if t == 5 { crate::print!("EfiRuntimeServicesCode"); }
+    else if t == 6 { crate::print!("EfiRuntimeServicesData"); }
+    else if t == 7 { crate::print!("EfiConventionalMemory"); }
+    else if t == 8 { crate::print!("EfiUnusableMemory"); }
+    else if t == 9 { crate::print!("EfiACPIReclaimMemory"); }
+    else if t == 10 { crate::print!("EfiACPIMemoryNVS"); }
+    else if t == 11 { crate::print!("EfiMemoryMappedIO"); }
+    else if t == 12 { crate::print!("EfiMemoryMappedIOPortSpace"); }
+    else if t == 13 { crate::print!("EfiPalCode"); }
+    else if t == 14 { crate::print!("EfiPersistentMemory"); }
+    else if t == 15 { crate::print!("EfiUnacceptedMemoryType"); }
+    else { crate::print!("unknown"); }
+    crate::println!(
+        ", base={:#018x}, size={:#018x}, attr={:#018x}",
+        descriptor.PhysicalStart as usize,
+        size_in_bytes as usize,
+        descriptor.Attribute as usize,
+    );
 }
 
 /// Empty EFI memory descriptor used to initialize diagnostics scratch storage.
