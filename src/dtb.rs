@@ -4,6 +4,7 @@
 //! It is intentionally separate from the low-level flattened-device-tree parser
 //! so boot methods can depend on one stable DTB object type.
 
+use core::mem::size_of;
 use core::ptr;
 
 use crate::memory::{
@@ -45,6 +46,8 @@ pub enum DtbError {
     NodeNotFound,
     /// The structure block contents were malformed.
     BadStructure,
+    /// The DTB header contained inconsistent offsets or section sizes.
+    InvalidHeader,
     /// Allocating pages for the cloned DTB failed.
     Memory(MemoryError),
 }
@@ -243,11 +246,15 @@ impl Dtb {
     /// - `pointer`: Pointer to the start of the device-tree blob.
     pub fn from_ptr(pointer: *const u8) -> Result<Self, DtbError> {
         validate_dtb_pointer(pointer)?;
+        // SAFETY: `validate_dtb_pointer()` rejects null and misaligned pointers,
+        // and only then allows reading the fixed-size DTB header fields.
         let header = unsafe { &*(pointer as *const DtbHeader) };
+        let total_size = header.total_size() as usize;
+        validate_header_layout(header, total_size)?;
 
         Ok(Self {
             pointer,
-            size: header.total_size() as usize,
+            size: total_size,
         })
     }
 
@@ -286,6 +293,10 @@ impl Dtb {
             .map_err(DtbError::Memory)?;
 
         let cloned_pointer = physical_start as *mut u8;
+        // SAFETY: `AllocatePages()` returned `allocated_size` writable bytes at
+        // `cloned_pointer`. The source blob is valid for `header_total_size`
+        // bytes, the destination is distinct from the source allocation, and
+        // the trailing zero fill stays within the allocated range.
         unsafe {
             ptr::copy_nonoverlapping(self.pointer, cloned_pointer, header_total_size);
             ptr::write_bytes(
@@ -309,6 +320,8 @@ impl Dtb {
     ///
     /// This function does not accept parameters.
     pub fn header(&self) -> &DtbHeader {
+        // SAFETY: All `Dtb` values are constructed from pointers validated by
+        // `from_ptr()` and continue to point at a DTB header for their lifetime.
         unsafe { &*(self.pointer as *const DtbHeader) }
     }
 
@@ -336,6 +349,8 @@ impl Dtb {
     ///
     /// This function does not accept parameters.
     pub fn bytes(&self) -> &[u8] {
+        // SAFETY: `self.pointer` references a DTB allocation of at least the
+        // header totalsize bytes, validated during construction and clone.
         unsafe {
             core::slice::from_raw_parts(
                 self.pointer,
@@ -482,6 +497,9 @@ impl Dtb {
             return Err(DtbError::BufferTooSmall);
         }
 
+        // SAFETY: `end <= self.size` guarantees the destination range lies
+        // within the DTB allocation, and the source slice is valid for
+        // `bytes.len()` readable bytes.
         unsafe {
             ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
@@ -527,7 +545,14 @@ impl Dtb {
         };
 
         self.insert_u32(record_offset, FDT_PROP)?;
-        self.insert_u32(record_offset + 4, (value.len() + 1) as u32)?;
+        let stored_length = value
+            .len()
+            .checked_add(1)
+            .ok_or(DtbError::SizeOverflow)
+            .and_then(|length| {
+                u32::try_from(length).map_err(|_| DtbError::SizeOverflow)
+            })?;
+        self.insert_u32(record_offset + 4, stored_length)?;
         self.insert_u32(record_offset + 8, name_offset)?;
         self.insert_bytes(record_offset + 12, value)?;
         self.insert_bytes(record_offset + 12 + value.len(), &[0])?;
@@ -569,7 +594,9 @@ impl Dtb {
         };
 
         self.insert_u32(record_offset, FDT_PROP)?;
-        self.insert_u32(record_offset + 4, value.len() as u32)?;
+        let stored_length =
+            u32::try_from(value.len()).map_err(|_| DtbError::SizeOverflow)?;
+        self.insert_u32(record_offset + 4, stored_length)?;
         self.insert_u32(record_offset + 8, name_offset)?;
         self.insert_bytes(record_offset + 12, value)?;
         self.zero_property_padding(record_offset, value.len())?;
@@ -878,26 +905,32 @@ impl Dtb {
     fn find_or_add_string(&mut self, name: &str) -> Result<u32, DtbError> {
         let strings_start = self.header().off_dt_strings() as usize;
         let strings_size = self.header().size_dt_strings() as usize;
-        let bytes = self.blob_bytes();
         let mut offset = 0usize;
-        while offset < strings_size {
-            let absolute_offset = strings_start + offset;
-            let mut cursor = absolute_offset;
-            while cursor < strings_start + strings_size {
-                if bytes[cursor] == 0 {
-                    let existing = core::str::from_utf8(&bytes[absolute_offset..cursor])
+        {
+            let bytes = self.blob_bytes();
+            while offset < strings_size {
+                let absolute_offset = strings_start + offset;
+                let mut cursor = absolute_offset;
+                while cursor < strings_start + strings_size {
+                    if bytes[cursor] == 0 {
+                        let existing = core::str::from_utf8(
+                            &bytes[absolute_offset..cursor],
+                        )
                         .map_err(|_| DtbError::BadStructure)?;
-                    if existing == name {
-                        return u32::try_from(offset).map_err(|_| DtbError::SizeOverflow);
+                        if existing == name {
+                            return u32::try_from(offset)
+                                .map_err(|_| DtbError::SizeOverflow);
+                        }
+                        offset = cursor - strings_start + 1;
+                        break;
                     }
-                    offset = cursor - strings_start + 1;
-                    break;
-                }
-                cursor += 1;
-            }
 
-            if cursor == strings_start + strings_size {
-                return Err(DtbError::BadStructure);
+                    cursor += 1;
+                }
+
+                if cursor == strings_start + strings_size {
+                    return Err(DtbError::BadStructure);
+                }
             }
         }
 
@@ -911,6 +944,9 @@ impl Dtb {
         self.insert_bytes(absolute_offset, name.as_bytes())?;
         self.insert_bytes(absolute_offset + name.len(), &[0])?;
 
+        // SAFETY: The DTB header lives at the start of `self.pointer`, and the
+        // strings-size field is updated only after the appended bytes were
+        // written successfully within the allocation.
         let header = unsafe { &mut *(self.pointer.cast_mut() as *mut DtbHeader) };
         header.set_size_dt_strings(
             u32::try_from(strings_size + append_length)
@@ -933,7 +969,7 @@ impl Dtb {
             let token = self.read_token(offset)?;
             match token {
                 FDT_BEGIN_NODE => {
-                    depth += 1;
+                    depth = depth.checked_add(1).ok_or(DtbError::BadStructure)?;
                     offset = self.after_begin_node(offset)?;
                 }
                 FDT_END_NODE => {
@@ -1012,6 +1048,10 @@ impl Dtb {
             return Err(DtbError::BufferTooSmall);
         }
 
+        // SAFETY: All computed offsets are checked against the active DTB
+        // bounds above. `ptr::copy` is used because the moved ranges may
+        // overlap during in-place growth or shrink, and the zero fill stays
+        // within the reserved replacement region.
         unsafe {
             let base = self.pointer.cast_mut();
             ptr::copy(
@@ -1024,17 +1064,19 @@ impl Dtb {
 
         let delta = new_len as isize - old_len as isize;
         let delta_i32 = i32::try_from(delta).map_err(|_| DtbError::SizeOverflow)?;
+        // SAFETY: The DTB header is stored at the start of the allocation and
+        // is updated atomically after the structure splice succeeds.
         let header = unsafe { &mut *(self.pointer.cast_mut() as *mut DtbHeader) };
         header.set_size_dt_struct(
             header
                 .size_dt_struct()
-            .checked_add_signed(delta_i32)
+                .checked_add_signed(delta_i32)
                 .ok_or(DtbError::SizeOverflow)?,
         );
         header.set_off_dt_strings(
             header
                 .off_dt_strings()
-            .checked_add_signed(delta_i32)
+                .checked_add_signed(delta_i32)
                 .ok_or(DtbError::SizeOverflow)?,
         );
 
@@ -1060,6 +1102,8 @@ impl Dtb {
 
         let padding_offset = property_offset + 12 + value_length;
         self.ensure_range(padding_offset, padding)?;
+        // SAFETY: `ensure_range()` guarantees the padding range lies within the
+        // DTB allocation and may be zeroed in place.
         unsafe {
             ptr::write_bytes(self.pointer.cast_mut().add(padding_offset), 0, padding);
         }
@@ -1106,6 +1150,8 @@ impl Dtb {
     ///
     /// This function does not accept parameters.
     fn blob_bytes(&self) -> &[u8] {
+        // SAFETY: `self.pointer` is the base of a DTB allocation tracked by
+        // `self.size`, so constructing an immutable slice of that span is valid.
         unsafe { core::slice::from_raw_parts(self.pointer, self.size) }
     }
 
@@ -1170,9 +1216,45 @@ fn validate_dtb_pointer(pointer: *const u8) -> Result<(), DtbError> {
         return Err(DtbError::MisalignedPointer);
     }
 
+    // SAFETY: The pointer is non-null and 8-byte aligned, which satisfies the
+    // alignment requirement of `DtbHeader` before reading its fixed fields.
     let header = unsafe { &*(pointer as *const DtbHeader) };
     if header.magic() != FDT_MAGIC {
         return Err(DtbError::BadMagic);
+    }
+
+    if (header.total_size() as usize) < size_of::<DtbHeader>() {
+        return Err(DtbError::InvalidHeader);
+    }
+
+    Ok(())
+}
+
+/// Validates that the DTB sections described by the header fit in the blob.
+///
+/// # Parameters
+///
+/// - `header`: Decoded DTB header fields.
+/// - `total_size`: Total blob size from the header in bytes.
+fn validate_header_layout(
+    header: &DtbHeader,
+    total_size: usize,
+) -> Result<(), DtbError> {
+    let struct_start = header.off_dt_struct() as usize;
+    let struct_end = struct_start
+        .checked_add(header.size_dt_struct() as usize)
+        .ok_or(DtbError::SizeOverflow)?;
+    let strings_start = header.off_dt_strings() as usize;
+    let strings_end = strings_start
+        .checked_add(header.size_dt_strings() as usize)
+        .ok_or(DtbError::SizeOverflow)?;
+
+    if struct_start < size_of::<DtbHeader>()
+        || struct_end > total_size
+        || strings_start < size_of::<DtbHeader>()
+        || strings_end > total_size
+    {
+        return Err(DtbError::InvalidHeader);
     }
 
     Ok(())
