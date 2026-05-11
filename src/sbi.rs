@@ -21,6 +21,9 @@ const SBI_SRST_RESET_REASON_NONE: usize = 0;
 const SBI_SRST_RESET_REASON_SYSTEM_FAILURE: usize = 1;
 
 /// SBI return pair carrying an error code and one return value.
+///
+/// `repr(C)` preserves the field order used when collecting the `a0` and `a1`
+/// register outputs from the inline assembly helper.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub(crate) struct SbiRet {
@@ -66,6 +69,9 @@ fn ecall(
             in("a5") arg5,
             in("a6") fid,
             in("a7") eid,
+            // SBI arguments are passed entirely through registers. Pointer-based
+            // calls such as DBCN receive the pointed-to buffer address in one
+            // of those registers, so no separate memory operand is required.
             options(nostack)
         );
     }
@@ -74,6 +80,9 @@ fn ecall(
 }
 
 /// Writes one string slice through the SBI debug console extension.
+///
+/// Callers typically ignore the returned status because console output is
+/// treated as best-effort diagnostics.
 ///
 /// # Parameters
 ///
@@ -93,10 +102,17 @@ pub(crate) fn puts(message: &str) -> SbiRet {
 
 /// Stops forward progress by repeatedly waiting for interrupts.
 ///
+/// Supervisor interrupts are disabled before entering the wait loop so fatal
+/// shutdown paths cannot resume normal execution through an interrupt handler.
+///
 /// # Parameters
 ///
 /// This function does not accept parameters.
 fn halt() -> ! {
+    unsafe {
+        asm!("csrci sstatus, 2", options(nomem, nostack, preserves_flags));
+    }
+
     loop {
         unsafe {
             asm!("wfi", options(nomem, nostack, preserves_flags));
