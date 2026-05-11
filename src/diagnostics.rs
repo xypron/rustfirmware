@@ -14,6 +14,12 @@ use crate::dtb_memory::{
 use crate::dtb_read::Fdt;
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 
+/// Build profile name injected by the Makefile for runtime diagnostics.
+const BUILD_PROFILE: &str = match option_env!("PROFILE_NAME") {
+    Some(profile) => profile,
+    None => "unknown",
+};
+
 /// Prints the RustFW ASCII-art banner after relocation.
 ///
 /// # Parameters
@@ -29,6 +35,20 @@ pub fn print_rustfw_banner() {
             r" |_|   \__,_|___/\__|_|      \_/\_/", "\n"
         ),
         &[],
+    );
+}
+
+/// Prints the firmware name, version, and build profile.
+///
+/// # Parameters
+///
+/// This function does not accept parameters.
+pub fn greet() {
+    crate::println!(
+        "{} {} ({})",
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+        BUILD_PROFILE,
     );
 }
 

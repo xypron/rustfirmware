@@ -9,6 +9,11 @@ use core::mem;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{fence, Ordering};
 
+use crate::filesystem::{detect_partition_filesystem, DetectedFilesystem};
+use crate::gpt::GptPartitionTable;
+use crate::linux::try_boot_from_partition as linux_try_boot_from_partition;
+use crate::partition::{PartitionEntry, PartitionTable};
+
 /// VirtIO MMIO magic value for transport discovery.
 pub const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
 /// Version value used by modern VirtIO MMIO devices.
@@ -107,6 +112,116 @@ pub const VIRTQ_DESC_F_INDIRECT: u16 = 4;
 pub const VIRTQ_AVAIL_F_NO_INTERRUPT: u16 = 1;
 /// Used ring flag suppressing notifications to the device.
 pub const VIRTQ_USED_F_NO_NOTIFY: u16 = 1;
+
+/// Probes QEMU VirtIO block devices, prints GPT partition information, and
+/// attempts Linux boot from boot-flagged partitions.
+///
+/// # Parameters
+///
+/// - `boot_hart`: Original hart identifier received in register `a0`.
+/// - `device_tree_ptr`: Original device-tree pointer received in register `a1`.
+pub fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
+    let mut found_any = false;
+    let mut block_device_index = 0usize;
+
+    for probe in qemu_virt_block_devices() {
+        found_any = true;
+        crate::println!(
+            "virtio: block device at slot {} base {:#018x}",
+            probe.slot,
+            probe.device.base_address(),
+        );
+
+        let current_block_device_index = block_device_index;
+        block_device_index += 1;
+
+        let mut driver = match unsafe { VirtioBlockDriver::new(probe.device) } {
+            Ok(driver) => driver,
+            Err(_) => {
+                crate::println!("gpt: virtio block init failed");
+                continue;
+            }
+        };
+
+        let mut partitions = match GptPartitionTable::new(&mut driver) {
+            Some(partitions) => partitions,
+            None => {
+                crate::println!("gpt: no primary GPT header");
+                continue;
+            }
+        };
+
+        let partition_count = partitions.partition_count();
+        let mut partition_index = 0;
+        while partition_index < partition_count {
+            let partition = match partitions.partition(partition_index) {
+                Some(partition) => partition,
+                None => break,
+            };
+
+            partition_index += 1;
+
+            if !partition.is_present() {
+                continue;
+            }
+
+            let mut label = [0u8; 72];
+            let mut partition_type = [0u8; 36];
+            let partition_start_lba = partition.first_lba();
+            let bootable = partition.bootable();
+            // Partition entries borrow the GPT table, so drop that view before
+            // probing the same block device as FAT or ext4.
+            drop(partitions);
+            let filesystem = detect_partition_filesystem(
+                &mut driver,
+                partition_start_lba,
+            );
+
+            let filesystem_name = match filesystem {
+                DetectedFilesystem::Fat => "fat",
+                DetectedFilesystem::Ext4 => "ext4",
+                DetectedFilesystem::Unknown => "unknown",
+            };
+
+            crate::println!(
+                "partition {}: start={}, size={}, label='{}', type='{}', fs='{}', bootflag={}",
+                partition_index,
+                partition_start_lba,
+                partition.sector_count(),
+                partition.label(&mut label),
+                partition.partition_type(&mut partition_type),
+                filesystem_name,
+                bootable,
+            );
+
+            if bootable {
+                linux_try_boot_from_partition(
+                    &mut driver,
+                    partition,
+                    filesystem,
+                    current_block_device_index,
+                    partition_index,
+                    boot_hart,
+                    device_tree_ptr,
+                );
+            }
+
+            // Reopen the GPT view after direct filesystem probing/loading so
+            // the next loop iteration can read partition metadata again.
+            partitions = match GptPartitionTable::new(&mut driver) {
+                Some(partitions) => partitions,
+                None => {
+                    crate::println!("gpt: failed to reopen partition table");
+                    break;
+                }
+            };
+        }
+    }
+
+    if !found_any {
+        crate::println!("virtio: no block device found on qemu virt mmio");
+    }
+}
 
 /// Errors returned by the minimal VirtIO block driver.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

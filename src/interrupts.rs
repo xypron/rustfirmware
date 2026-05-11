@@ -38,6 +38,17 @@ pub(crate) fn smode_trap_vector_offset() -> usize {
     core::ptr::addr_of!(smode_trap_vector) as usize
 }
 
+/// Returns the runtime address of the active image trap vector.
+///
+/// # Parameters
+///
+/// - `runtime_base`: Runtime base address of the active firmware image.
+pub(crate) fn trap_vector_address(runtime_base: usize) -> usize {
+    runtime_base
+        .checked_add(smode_trap_vector_offset())
+        .unwrap()
+}
+
 /// Installs the direct S-mode trap vector used for firmware exceptions.
 ///
 /// # Parameters

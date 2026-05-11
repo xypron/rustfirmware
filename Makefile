@@ -84,13 +84,13 @@ debug: $(BIN) test.img
 		-device virtio-blk-device,drive=drv0,bus=$(QEMU_VIRTIO_MMIO_BUS),bootindex=1
 
 gpt-test:
-	cargo run --target $(HOST_TARGET) --bin gpt_test -- $(ARGS)
+	cargo run --target $(HOST_TARGET) --features host-tools --bin gpt_test -- $(ARGS)
 
 fat-test:
-	cargo run --target $(HOST_TARGET) --bin fat_test -- $(ARGS)
+	cargo run --target $(HOST_TARGET) --features host-tools --bin fat_test -- $(ARGS)
 
 ext4-test:
-	cargo run --target $(HOST_TARGET) --bin ext4_test -- $(ARGS)
+	cargo run --target $(HOST_TARGET) --features host-tools --bin ext4_test -- $(ARGS)
 
 clean:
 	cargo clean

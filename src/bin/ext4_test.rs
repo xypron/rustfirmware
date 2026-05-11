@@ -160,6 +160,25 @@ mod virtio {
     }
 }
 
+mod fat {
+    //! Minimal stub so shared filesystem helpers can compile in the ext4 host test.
+
+    use crate::virtio::BlockDevice;
+
+    /// Host-test FAT stub used only to satisfy shared filesystem imports.
+    pub struct FatVolume;
+
+    impl FatVolume {
+        /// The ext4 host test never mounts FAT, so this always reports failure.
+        pub fn new<D: BlockDevice>(
+            _device: &mut D,
+            _partition_start_lba: u64,
+        ) -> Result<Self, ()> {
+            Err(())
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[path = "../filesystem.rs"]
 mod filesystem;

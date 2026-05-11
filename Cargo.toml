@@ -3,6 +3,52 @@ name = "rustfimware"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-only"
+autobins = false
+
+[features]
+default = []
+host-tools = []
+
+[[bin]]
+name = "rustfimware"
+path = "src/main.rs"
+test = false
+
+[[bin]]
+name = "dtb_test"
+path = "src/bin/dtb_test.rs"
+required-features = ["host-tools"]
+test = false
+
+[[bin]]
+name = "ext4_test"
+path = "src/bin/ext4_test.rs"
+required-features = ["host-tools"]
+test = false
+
+[[bin]]
+name = "fat_test"
+path = "src/bin/fat_test.rs"
+required-features = ["host-tools"]
+test = false
+
+[[bin]]
+name = "gpt_test"
+path = "src/bin/gpt_test.rs"
+required-features = ["host-tools"]
+test = false
+
+[[bin]]
+name = "memory_map_test"
+path = "src/bin/memory_map_test.rs"
+required-features = ["host-tools"]
+test = false
+
+[[bin]]
+name = "print_test"
+path = "src/bin/print_test.rs"
+required-features = ["host-tools"]
+test = false
 
 [profile.dev]
 panic = "abort"
