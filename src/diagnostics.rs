@@ -3,7 +3,7 @@
 //! This module prints raw device-tree information first and then prints the
 //! EFI-style page map built from that information by the memory subsystem.
 
-use crate::devicetree::{Fdt, MemoryRegion};
+use crate::dtb_read::{Fdt, MemoryRegion};
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
 
 /// Prints the RustFW ASCII-art banner after relocation.

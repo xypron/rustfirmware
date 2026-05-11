@@ -24,9 +24,9 @@ pub mod fat;
 /// Read-only ext4 filesystem support for loading files by path.
 pub mod ext4;
 /// Boot-oriented device-tree object stub.
-pub mod dtb;
+pub mod dtb_write;
 /// Flattened device tree parsing helpers used for diagnostics and future edits.
-pub mod devicetree;
+pub mod dtb_read;
 /// Firmware diagnostics output and reporting.
 pub mod diagnostics;
 /// Formatted console output helpers built on top of OpenSBI.
@@ -41,7 +41,7 @@ pub mod memory;
 use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
-use devicetree::MemoryRegion;
+use dtb_read::MemoryRegion;
 use diagnostics::print_diagnostics;
 use filesystem::{detect_partition_filesystem, DetectedFilesystem};
 use gpt::GptPartitionTable;

@@ -11,7 +11,7 @@
 use core::arch::asm;
 use core::cmp::{max, min};
 
-use crate::devicetree::{Fdt, MemoryRegion};
+use crate::dtb_read::{Fdt, MemoryRegion};
 
 unsafe extern "C" {
     /// Linker-defined start of the firmware text and rodata range.

@@ -4,7 +4,7 @@
 //! Host-side DTB validation binary.
 //!
 //! This tool discovers `in*.dts` fixtures under `tests/data`, compiles them to
-//! DTB form with `dtc`, mutates the resulting blobs through `src/dtb.rs`, writes
+//! DTB form with `dtc`, mutates the resulting blobs through `src/dtb_write.rs`, writes
 //! matching `out*.dtb` files, and finally re-runs `dtc` to verify the mutated
 //! trees decode cleanly and contain the expected `/chosen` properties.
 
@@ -124,11 +124,11 @@ mod memory {
 }
 
 #[allow(dead_code)]
-#[path = "../dtb.rs"]
-mod dtb;
+#[path = "../dtb_write.rs"]
+mod dtb_write;
 
-use dtb::Dtb;
-use dtb::DtbError;
+use dtb_write::Dtb;
+use dtb_write::DtbError;
 use memory::PageAllocator;
 
 /// Directory holding host-side DTB test fixtures.
