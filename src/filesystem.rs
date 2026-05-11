@@ -153,6 +153,10 @@ impl LoadedFile {
     ///
     /// This function does not accept parameters.
     pub fn bytes(&self) -> &[u8] {
+        // SAFETY: `LoadedFile` is only constructed after allocating or using a
+        // live page-backed region that covers `size_bytes` bytes starting at
+        // `physical_start`, so this immutable slice stays within that loaded
+        // file buffer.
         unsafe {
             slice::from_raw_parts(
                 self.physical_start as *const u8,
@@ -183,6 +187,7 @@ pub trait FileHandle: FileInfoView {
     ///
     /// - `allocator`: Page allocator used to reserve the destination pages.
     /// - `physical_start`: Page-aligned physical start address to allocate.
+    ///   Callers must supply an EFI page-aligned address.
     fn load_at(
         &mut self,
         allocator: &mut PageAllocator<'_>,
@@ -262,9 +267,18 @@ pub fn load_first_file<F: FileSystem, P: AsRef<str> + Copy>(
     while let Some(path) = candidate_path(index) {
         let path_text = path.as_ref();
         if let Ok(mut file) = volume.open(path_text) {
-            if let Ok(loaded) = file.load(allocator) {
-                print_loaded_file(filesystem_name, path_text, &loaded);
-                return Some((path, loaded));
+            match file.load(allocator) {
+                Ok(loaded) => {
+                    print_loaded_file(filesystem_name, path_text, &loaded);
+                    return Some((path, loaded));
+                }
+                Err(_) => {
+                    crate::println!(
+                        "{}: found '{}' but failed to load it",
+                        filesystem_name,
+                        path_text,
+                    );
+                }
             }
         }
         index += 1;
