@@ -46,7 +46,7 @@ use diagnostics::print_diagnostics;
 use filesystem::{detect_partition_filesystem, DetectedFilesystem};
 use gpt::GptPartitionTable;
 use interrupts::{install_smode_trap_vector, smode_trap_vector_offset};
-use linux::{try_boot_from_partition as linux_try_boot_from_partition, LinuxBootFilesystem};
+use linux::try_boot_from_partition as linux_try_boot_from_partition;
 use memory::{
     page_allocator_from_live_fdt, EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE,
     EMPTY_MEMORY_DESCRIPTOR,
@@ -323,12 +323,6 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
                 DetectedFilesystem::Unknown => "unknown",
             };
 
-            let linux_filesystem = match filesystem {
-                DetectedFilesystem::Fat => LinuxBootFilesystem::Fat,
-                DetectedFilesystem::Ext4 => LinuxBootFilesystem::Ext4,
-                DetectedFilesystem::Unknown => LinuxBootFilesystem::Unknown,
-            };
-
             crate::println!(
                 "partition {}: start={}, size={}, label='{}', type='{}', fs='{}', bootflag={}",
                 partition_index,
@@ -344,7 +338,7 @@ fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
                 linux_try_boot_from_partition(
                     &mut driver,
                     partition,
-                    linux_filesystem,
+                    filesystem,
                     current_block_device_index,
                     partition_index,
                     boot_hart,
@@ -415,7 +409,7 @@ fn run_firmware(
 ) -> ! {
     install_smode_trap_vector(trap_vector_address());
 
-    if boot_hart == 0 && firmware_runtime_base() == PRIMARY_FIRMWARE_LOAD_ADDRESS {
+    if firmware_runtime_base() == PRIMARY_FIRMWARE_LOAD_ADDRESS {
         if let Some(()) = try_relocate_firmware(boot_hart, device_tree, entry_stack) {
             unreachable!();
         }
@@ -424,7 +418,6 @@ fn run_firmware(
     }
 
     if firmware_runtime_base() != PRIMARY_FIRMWARE_LOAD_ADDRESS {
-        install_smode_trap_vector(trap_vector_address());
         diagnostics::print_rustfw_banner();
     }
 
@@ -440,8 +433,15 @@ fn run_firmware(
 ///
 /// # Parameters
 ///
-/// - `_info`: Panic metadata supplied by the Rust core runtime.
-fn panic(_info: &PanicInfo<'_>) -> ! {
+/// - `info`: Panic metadata supplied by the Rust core runtime.
+fn panic(info: &PanicInfo<'_>) -> ! {
     crate::println!("rustfimware: panic");
+    if let Some(location) = info.location() {
+        crate::println!(
+            "rustfimware: panic location {}:{}",
+            location.file(),
+            location.line(),
+        );
+    }
     poweroff_on_failure()
 }

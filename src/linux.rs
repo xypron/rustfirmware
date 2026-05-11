@@ -7,7 +7,10 @@
 
 use crate::dtb::{Dtb, DtbError};
 use crate::ext4::Ext4Volume;
-use crate::filesystem::{load_first_file, FileInfo, FileInfoView, FileSystem, FileType, LoadedFile};
+use crate::filesystem::{
+    load_first_file, DetectedFilesystem, FileInfo, FileInfoView, FileSystem,
+    FileType, LoadedFile,
+};
 use crate::fat::FatVolume;
 use crate::memory::{page_allocator_from_live_fdt, AllocationDirection, EFI_MEMORY_TYPE, PageAllocator, EMPTY_MEMORY_DESCRIPTOR};
 use crate::partition::PartitionEntry;
@@ -32,7 +35,7 @@ const KERNEL_ALIGNMENT: u64 = 2 * 1024 * 1024;
 #[derive(Clone, Copy)]
 struct BootPath {
     /// UTF-8 bytes for the path text.
-    bytes: [u8; 16],
+    bytes: [u8; 64],
     /// Number of initialized bytes in `bytes`.
     len: usize,
 }
@@ -44,11 +47,11 @@ impl BootPath {
     ///
     /// - `bytes`: UTF-8 path bytes to store inline.
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() > 16 {
+        if bytes.len() > 64 {
             return None;
         }
 
-        let mut path_bytes = [0u8; 16];
+        let mut path_bytes = [0u8; 64];
         path_bytes[..bytes.len()].copy_from_slice(bytes);
         Some(Self {
             bytes: path_bytes,
@@ -216,17 +219,6 @@ pub enum LinuxBootError {
     DeviceTreeUpdate(DtbError),
 }
 
-/// Filesystem classification derived from probing one partition start sector.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LinuxBootFilesystem {
-    /// The partition mounted successfully as FAT.
-    Fat,
-    /// The partition mounted successfully as ext4.
-    Ext4,
-    /// The partition did not match the supported filesystem probes.
-    Unknown,
-}
-
 /// Returns one kernel candidate path by search order.
 ///
 /// # Parameters
@@ -360,14 +352,14 @@ pub fn try_boot_from_filesystem<F: FileSystem>(
 pub fn try_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
     device: &mut D,
     partition: P,
-    filesystem: LinuxBootFilesystem,
+    filesystem: DetectedFilesystem,
     block_device_index: usize,
     partition_number: u32,
     boot_hart: usize,
     device_tree_ptr: *const u8,
 ) {
     match filesystem {
-        LinuxBootFilesystem::Fat => {
+        DetectedFilesystem::Fat => {
             let mut volume = match FatVolume::new(device, partition.first_lba()) {
                 Ok(volume) => volume,
                 Err(_) => return,
@@ -381,7 +373,7 @@ pub fn try_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
                 device_tree_ptr,
             );
         }
-        LinuxBootFilesystem::Ext4 => {
+        DetectedFilesystem::Ext4 => {
             let mut volume = match Ext4Volume::new(device, partition.first_lba()) {
                 Ok(volume) => volume,
                 Err(_) => return,
@@ -395,7 +387,7 @@ pub fn try_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
                 device_tree_ptr,
             );
         }
-        LinuxBootFilesystem::Unknown => {}
+        DetectedFilesystem::Unknown => {}
     }
 }
 

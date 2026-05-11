@@ -16,7 +16,7 @@ pub trait PartitionEntry {
 
     /// Returns the number of sectors covered by the partition.
     fn sector_count(&self) -> u64 {
-        self.last_lba() - self.first_lba() + 1
+        self.last_lba().saturating_sub(self.first_lba()).saturating_add(1)
     }
 
     /// Returns `true` when the partition is marked bootable.
