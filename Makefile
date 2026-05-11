@@ -2,7 +2,8 @@ HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 TARGET := riscv64imac-unknown-none-elf
 PROFILE ?= release
 PACKAGE := rustfimware
-BUILD_DIR := target/$(TARGET)/$(PROFILE)
+PROFILE_DIR := $(if $(filter $(PROFILE),dev),debug,$(PROFILE))
+BUILD_DIR := target/$(TARGET)/$(PROFILE_DIR)
 ELF := $(BUILD_DIR)/$(PACKAGE)
 BIN := build/$(PACKAGE).bin
 # UBUNTU_IMG_URL := https://cdimage.ubuntu.com/releases/26.04/release/ubuntu-26.04-preinstalled-server-riscv64.img.xz
@@ -21,14 +22,18 @@ QEMU_NETDEV_FLAGS := -netdev user,id=$(QEMU_NETDEV_ID)
 QEMU_VIRTIO_NET_FLAGS := -device virtio-net-device,netdev=$(QEMU_NETDEV_ID)
 QEMU_GDB_PORT := 1234
 
-.PHONY: all build docs check debug clean gpt-test fat-test ext4-test
+.PHONY: all build build_diagnostic docs check debug clean gpt-test fat-test ext4-test
 
 all: $(BIN)
 
-build: $(BIN)
+build:
+	$(MAKE) -B RUSTFW_PRINT_MEMORY_LAYOUT=0 $(BIN)
+
+build_diagnostic:
+	$(MAKE) -B RUSTFW_PRINT_MEMORY_LAYOUT=1 $(BIN)
 
 $(ELF):
-	PROFILE_NAME=$(PROFILE) cargo build --target $(TARGET) --profile $(PROFILE) --bin $(PACKAGE)
+	RUSTFW_PRINT_MEMORY_LAYOUT=$(RUSTFW_PRINT_MEMORY_LAYOUT) PROFILE_NAME=$(PROFILE) cargo build --target $(TARGET) --profile $(PROFILE) --bin $(PACKAGE)
 
 $(BIN): $(ELF)
 	mkdir -p $(dir $(BIN))

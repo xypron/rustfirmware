@@ -44,7 +44,8 @@ use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 use core::ptr;
 use dtb_memory::MemoryRegion;
-use diagnostics::{print_diagnostics, print_memory_layout};
+use diagnostics::print_diagnostics;
+use diagnostics::print_memory_layout;
 use filesystem::{detect_partition_filesystem, DetectedFilesystem};
 use gpt::GptPartitionTable;
 use interrupts::{install_smode_trap_vector, smode_trap_vector_offset};
@@ -425,7 +426,9 @@ fn run_firmware(
 
     greet();
     print_diagnostics(boot_hart, device_tree);
-    print_memory_layout(device_tree);
+    if matches!(option_env!("RUSTFW_PRINT_MEMORY_LAYOUT"), Some("1")) {
+        print_memory_layout(device_tree);
+    }
     probe_virtio(boot_hart, device_tree);
     crate::println!("rustfimware: poweroff via sbi srst");
     poweroff()
