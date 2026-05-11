@@ -4,9 +4,12 @@
 //! EFI-style page map built from that information by the memory subsystem.
 
 use crate::dtb_memory::{
+    for_each_static_reserved_memory_region,
     memory_regions as dtb_memory_regions,
+    reserve_map_regions as dtb_reserve_map_regions,
     reserved_regions as dtb_reserved_regions,
     MemoryRegion,
+    ReservedMemoryType,
 };
 use crate::dtb_read::Fdt;
 use crate::memory::{memory_map_from_fdt, EFI_MEMORY_DESCRIPTOR, EFI_PAGE_SIZE};
@@ -133,7 +136,8 @@ pub fn print_fdt_information(
     reserved_regions: &mut [MemoryRegion],
 ) {
     let memory_region_count = dtb_memory_regions(fdt, memory_regions);
-    let reserved_region_count = dtb_reserved_regions(fdt, reserved_regions);
+    let reserve_map_region_count = dtb_reserve_map_regions(fdt, reserved_regions);
+    let _ = dtb_reserved_regions(fdt, reserved_regions);
 
     let mut index = 0usize;
     while index < memory_region_count {
@@ -147,7 +151,7 @@ pub fn print_fdt_information(
     }
 
     index = 0;
-    while index < reserved_region_count {
+    while index < reserve_map_region_count {
         crate::println!(
             "reserved {}: base={:#018x}, size={:#018x}",
             index + 1,
@@ -156,6 +160,22 @@ pub fn print_fdt_information(
         );
         index += 1;
     }
+
+    for_each_static_reserved_memory_region(fdt, |region, memory_type| {
+        index += 1;
+        crate::print!(
+            "reserved {}: base={:#018x}, size={:#018x}, no-map=",
+            index,
+            region.base as usize,
+            region.size as usize,
+        );
+        if memory_type == ReservedMemoryType::Reserved {
+            crate::println!("yes");
+        } else {
+            crate::println!("no");
+        }
+        true
+    });
 }
 
 /// Prints the EFI-style memory map produced by the memory subsystem.
