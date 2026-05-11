@@ -4,8 +4,12 @@
 //! node, property, and reserve-map accessors without embedding policy-specific
 //! interpretation such as RAM or reserved-memory queries.
 
+use core::mem::size_of;
 use core::slice;
 use core::str;
+
+/// Size in bytes of the flattened device tree header.
+const FDT_HEADER_SIZE: usize = size_of::<u32>() * 10;
 
 /// Flattened device tree header magic value.
 pub(crate) const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -23,12 +27,18 @@ pub(crate) const FDT_END: u32 = 9;
 /// Errors returned while validating the flattened device tree blob.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FdtError {
+    /// The supplied device-tree pointer was null.
+    NullPointer,
+    /// The supplied device-tree pointer was not 8-byte aligned.
+    MisalignedPointer,
     /// The blob header did not contain the FDT magic value.
     BadMagic,
     /// The blob or one of its sections ended before required data was available.
     Truncated,
     /// The blob version is older than the minimum supported format version.
     UnsupportedVersion,
+    /// The blob header contained inconsistent offsets or section sizes.
+    InvalidHeader,
 }
 
 /// One validated node inside the FDT structure block.
@@ -75,6 +85,8 @@ impl<'a> Fdt<'a> {
     ///
     /// - `ptr_raw`: Raw pointer to the start of the flattened device tree blob.
     pub unsafe fn from_ptr(ptr_raw: *const u8) -> Result<Self, FdtError> {
+        validate_dtb_pointer(ptr_raw)?;
+
         if read_be_u32(ptr_raw, 0).ok_or(FdtError::Truncated)? != FDT_MAGIC {
             return Err(FdtError::BadMagic);
         }
@@ -91,11 +103,27 @@ impl<'a> Fdt<'a> {
             return Err(FdtError::UnsupportedVersion);
         }
 
-        if off_mem_rsvmap > total_size
-            || off_dt_struct + size_dt_struct > total_size
-            || off_dt_strings + size_dt_strings > total_size
-        {
+        if total_size < FDT_HEADER_SIZE {
+            return Err(FdtError::InvalidHeader);
+        }
+
+        let struct_end = off_dt_struct
+            .checked_add(size_dt_struct)
+            .ok_or(FdtError::InvalidHeader)?;
+        let strings_end = off_dt_strings
+            .checked_add(size_dt_strings)
+            .ok_or(FdtError::InvalidHeader)?;
+
+        if off_mem_rsvmap > total_size {
             return Err(FdtError::Truncated);
+        }
+
+        if off_dt_struct < FDT_HEADER_SIZE
+            || struct_end > total_size
+            || off_dt_strings < FDT_HEADER_SIZE
+            || strings_end > total_size
+        {
+            return Err(FdtError::InvalidHeader);
         }
 
         let blob = unsafe { slice::from_raw_parts(ptr_raw, total_size) };
@@ -103,8 +131,8 @@ impl<'a> Fdt<'a> {
             base: ptr_raw,
             total_size,
             reserve_map: &blob[off_mem_rsvmap..],
-            structure: &blob[off_dt_struct..off_dt_struct + size_dt_struct],
-            strings: &blob[off_dt_strings..off_dt_strings + size_dt_strings],
+            structure: &blob[off_dt_struct..struct_end],
+            strings: &blob[off_dt_strings..strings_end],
         })
     }
 
@@ -516,4 +544,21 @@ fn read_be_u32(ptr_raw: *const u8, offset: usize) -> Option<u32> {
     let word_ptr = unsafe { ptr_raw.add(offset) };
     let bytes = unsafe { slice::from_raw_parts(word_ptr, 4) };
     Some(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Validates the raw pointer used to construct one FDT view.
+///
+/// # Parameters
+///
+/// - `ptr_raw`: Pointer to the start of the flattened device tree blob.
+fn validate_dtb_pointer(ptr_raw: *const u8) -> Result<(), FdtError> {
+    if ptr_raw.is_null() {
+        return Err(FdtError::NullPointer);
+    }
+
+    if (ptr_raw as usize & 0x7) != 0 {
+        return Err(FdtError::MisalignedPointer);
+    }
+
+    Ok(())
 }

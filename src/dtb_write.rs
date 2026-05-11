@@ -4,12 +4,11 @@
 //! It is intentionally separate from the low-level flattened-device-tree parser
 //! so boot methods can depend on one stable DTB object type.
 
-use core::mem::size_of;
 use core::ptr;
 
 use crate::dtb_read::{
-    align4, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE, FDT_MAGIC, FDT_NOP,
-    FDT_PROP,
+    align4, Fdt, FdtError, FDT_BEGIN_NODE, FDT_END, FDT_END_NODE,
+    FDT_NOP, FDT_PROP,
 };
 use crate::memory::{
     EFI_ALLOCATE_TYPE, EFI_MEMORY_TYPE, EFI_PAGE_SIZE, MemoryError,
@@ -230,12 +229,9 @@ impl Dtb {
     ///
     /// - `pointer`: Pointer to the start of the device-tree blob.
     pub fn from_ptr(pointer: *const u8) -> Result<Self, DtbError> {
-        validate_dtb_pointer(pointer)?;
-        // SAFETY: `validate_dtb_pointer()` rejects null and misaligned pointers,
-        // and only then allows reading the fixed-size DTB header fields.
-        let header = unsafe { &*(pointer as *const DtbHeader) };
-        let total_size = header.total_size() as usize;
-        validate_header_layout(header, total_size)?;
+        let total_size = unsafe { Fdt::from_ptr(pointer) }
+            .map_err(DtbError::from)?
+            .total_size_bytes();
 
         Ok(Self {
             pointer,
@@ -1168,60 +1164,20 @@ impl From<MemoryError> for DtbError {
     }
 }
 
-/// Validates the raw pointer used to construct one DTB object.
-///
-/// # Parameters
-///
-/// - `pointer`: Pointer to the start of the device-tree blob.
-fn validate_dtb_pointer(pointer: *const u8) -> Result<(), DtbError> {
-    if pointer.is_null() {
-        return Err(DtbError::NullPointer);
+impl From<FdtError> for DtbError {
+    /// Converts FDT validation failures into boot-oriented DTB errors.
+    ///
+    /// # Parameters
+    ///
+    /// - `error`: Reader-side validation error to wrap.
+    fn from(error: FdtError) -> Self {
+        match error {
+            FdtError::NullPointer => Self::NullPointer,
+            FdtError::MisalignedPointer => Self::MisalignedPointer,
+            FdtError::BadMagic => Self::BadMagic,
+            FdtError::Truncated
+            | FdtError::UnsupportedVersion
+            | FdtError::InvalidHeader => Self::InvalidHeader,
+        }
     }
-
-    if (pointer as usize & 0x7) != 0 {
-        return Err(DtbError::MisalignedPointer);
-    }
-
-    // SAFETY: The pointer is non-null and 8-byte aligned, which satisfies the
-    // alignment requirement of `DtbHeader` before reading its fixed fields.
-    let header = unsafe { &*(pointer as *const DtbHeader) };
-    if header.magic() != FDT_MAGIC {
-        return Err(DtbError::BadMagic);
-    }
-
-    if (header.total_size() as usize) < size_of::<DtbHeader>() {
-        return Err(DtbError::InvalidHeader);
-    }
-
-    Ok(())
-}
-
-/// Validates that the DTB sections described by the header fit in the blob.
-///
-/// # Parameters
-///
-/// - `header`: Decoded DTB header fields.
-/// - `total_size`: Total blob size from the header in bytes.
-fn validate_header_layout(
-    header: &DtbHeader,
-    total_size: usize,
-) -> Result<(), DtbError> {
-    let struct_start = header.off_dt_struct() as usize;
-    let struct_end = struct_start
-        .checked_add(header.size_dt_struct() as usize)
-        .ok_or(DtbError::SizeOverflow)?;
-    let strings_start = header.off_dt_strings() as usize;
-    let strings_end = strings_start
-        .checked_add(header.size_dt_strings() as usize)
-        .ok_or(DtbError::SizeOverflow)?;
-
-    if struct_start < size_of::<DtbHeader>()
-        || struct_end > total_size
-        || strings_start < size_of::<DtbHeader>()
-        || strings_end > total_size
-    {
-        return Err(DtbError::InvalidHeader);
-    }
-
-    Ok(())
 }
