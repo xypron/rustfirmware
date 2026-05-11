@@ -8,15 +8,20 @@
 //! conventional memory and then carved by reserved regions from the device-tree
 //! reserve map and `/reserved-memory` subtree.
 
-use core::arch::asm;
 use core::cmp::{max, min};
 
+#[cfg(target_os = "none")]
+use core::arch::asm;
+
 use crate::dtb_memory::{
+    for_each_static_reserved_memory_region,
     memory_regions as dtb_memory_regions, reserve_original_fdt,
-    reserved_regions as dtb_reserved_regions, MemoryRegion,
+    reserve_map_regions as dtb_reserve_map_regions,
+    reserved_regions as dtb_reserved_regions, MemoryRegion, ReservedMemoryType,
 };
 use crate::dtb_read::Fdt;
 
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     /// Linker-defined start of the firmware text and rodata range.
     static __firmware_code_start: u8;
@@ -206,7 +211,7 @@ impl<'a> PageAllocator<'a> {
         descriptors: &'a mut [EFI_MEMORY_DESCRIPTOR],
     ) -> Result<Self, MemoryError> {
         let memory_region_count = dtb_memory_regions(fdt, memory_regions);
-        let reserved_region_count = dtb_reserved_regions(fdt, reserved_regions);
+        let reserve_map_region_count = dtb_reserve_map_regions(fdt, reserved_regions);
         let mut allocator = Self {
             descriptors,
             descriptor_count: 0,
@@ -219,9 +224,26 @@ impl<'a> PageAllocator<'a> {
         allocator.coalesce();
         reserve_original_fdt(fdt, &mut allocator)?;
 
-        for region in &reserved_regions[..reserved_region_count] {
+        for region in &reserved_regions[..reserve_map_region_count] {
             allocator.add_reserved_region(*region)?;
         }
+
+        let mut reserved_memory_result = Ok(());
+        for_each_static_reserved_memory_region(fdt, |region, memory_type| {
+            match allocator.add_reserved_region_with_type(
+                region,
+                reserved_memory_type_to_efi(memory_type),
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    reserved_memory_result = Err(error);
+                    false
+                }
+            }
+        });
+        reserved_memory_result?;
+
+        let _ = dtb_reserved_regions(fdt, reserved_regions);
 
         allocator.add_firmware_region(
             linker_region(
@@ -522,14 +544,31 @@ impl<'a> PageAllocator<'a> {
     ///
     /// - `region`: Reserved region decoded from the device tree.
     fn add_reserved_region(&mut self, region: MemoryRegion) -> Result<(), MemoryError> {
+        self.add_reserved_region_with_type(
+            region,
+            EFI_MEMORY_TYPE::EfiReservedMemoryType,
+        )
+    }
+
+    /// Carves one reserved device-tree region with an explicit EFI type.
+    ///
+    /// # Parameters
+    ///
+    /// - `region`: Reserved region decoded from the device tree.
+    /// - `memory_type`: EFI memory type assigned to the carved range.
+    fn add_reserved_region_with_type(
+        &mut self,
+        region: MemoryRegion,
+        memory_type: EFI_MEMORY_TYPE,
+    ) -> Result<(), MemoryError> {
         let Some((reservation_start, reservation_end)) = align_region_to_pages(region, true)? else {
             return Ok(());
         };
 
-        self.carve_range(
+        self.carve_range_for_reserved_region(
             reservation_start,
             reservation_end,
-            EFI_MEMORY_TYPE::EfiReservedMemoryType,
+            memory_type,
         )
     }
 
@@ -579,6 +618,50 @@ impl<'a> PageAllocator<'a> {
             }
 
             if descriptor.Type != EFI_MEMORY_TYPE::EfiConventionalMemory as UINT32 {
+                index += 1;
+                continue;
+            }
+
+            let overlap_start = max(descriptor.PhysicalStart, start);
+            let overlap_end = min(descriptor_end, end);
+            let overlap_pages = bytes_to_pages(overlap_end - overlap_start);
+
+            index = self.replace_range(index, overlap_start, overlap_pages, memory_type)?;
+        }
+
+        Ok(())
+    }
+
+    /// Replaces overlapping conventional or reserved memory with `memory_type`.
+    ///
+    /// # Parameters
+    ///
+    /// - `start`: Inclusive physical start address of the carved range.
+    /// - `end`: Exclusive physical end address of the carved range.
+    /// - `memory_type`: EFI memory type assigned to the carved range.
+    fn carve_range_for_reserved_region(
+        &mut self,
+        start: EFI_PHYSICAL_ADDRESS,
+        end: EFI_PHYSICAL_ADDRESS,
+        memory_type: EFI_MEMORY_TYPE,
+    ) -> Result<(), MemoryError> {
+        let mut index = 0usize;
+        while index < self.descriptor_count {
+            let descriptor = self.descriptors[index];
+            let descriptor_end = descriptor_end(descriptor)?;
+
+            if descriptor_end <= start {
+                index += 1;
+                continue;
+            }
+
+            if descriptor.PhysicalStart >= end {
+                break;
+            }
+
+            if descriptor.Type != EFI_MEMORY_TYPE::EfiConventionalMemory as UINT32
+                && descriptor.Type != EFI_MEMORY_TYPE::EfiReservedMemoryType as UINT32
+            {
                 index += 1;
                 continue;
             }
@@ -1033,6 +1116,8 @@ fn linker_region(
 
 /// Returns the runtime address of the linker-defined firmware code start.
 fn firmware_code_start() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1044,10 +1129,18 @@ fn firmware_code_start() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware code end.
 fn firmware_code_end() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1059,10 +1152,18 @@ fn firmware_code_end() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware data start.
 fn firmware_data_start() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1074,10 +1175,18 @@ fn firmware_data_start() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware data end.
 fn firmware_data_end() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1089,10 +1198,18 @@ fn firmware_data_end() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware heap start.
 fn firmware_heap_start() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1104,10 +1221,18 @@ fn firmware_heap_start() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware heap end.
 fn firmware_heap_end() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1119,10 +1244,18 @@ fn firmware_heap_end() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware stack bottom.
 fn firmware_stack_bottom() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1134,10 +1267,18 @@ fn firmware_stack_bottom() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Returns the runtime address of the linker-defined firmware stack top.
 fn firmware_stack_top() -> EFI_PHYSICAL_ADDRESS {
+    #[cfg(target_os = "none")]
+    {
     let address: usize;
 
     unsafe {
@@ -1149,6 +1290,12 @@ fn firmware_stack_top() -> EFI_PHYSICAL_ADDRESS {
     }
 
     address as EFI_PHYSICAL_ADDRESS
+    }
+
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Converts a page count from `UINTN` to `UINT64`.
@@ -1260,5 +1407,19 @@ fn descriptors_are_compatible(left: EFI_MEMORY_DESCRIPTOR, right: EFI_MEMORY_DES
     match descriptor_end(left) {
         Ok(left_end) => right.PhysicalStart <= left_end,
         Err(_) => false,
+    }
+}
+
+/// Converts one DTB reserved-memory classification into an EFI memory type.
+///
+/// # Parameters
+///
+/// - `memory_type`: DTB reserved-memory classification to translate.
+fn reserved_memory_type_to_efi(memory_type: ReservedMemoryType) -> EFI_MEMORY_TYPE {
+    match memory_type {
+        ReservedMemoryType::Reserved => EFI_MEMORY_TYPE::EfiReservedMemoryType,
+        ReservedMemoryType::BootServicesData => {
+            EFI_MEMORY_TYPE::EfiBootServicesData
+        }
     }
 }

@@ -1,0 +1,35 @@
+/dts-v1/;
+
+/memreserve/ 0x80a00000 0x00100000;
+/memreserve/ 0x80600000 0x00100000;
+
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x00000000 0x80000000 0x00000000 0x02000000>;
+    };
+
+    reserved-memory {
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+
+        framebuffer@80800000 {
+            reg = <0x00000000 0x80800000 0x00000000 0x00100000>;
+            no-map;
+        };
+
+        linux-loader@80a00000 {
+            reg = <0x00000000 0x80a00000 0x00000000 0x00100000>;
+        };
+
+        shared-dma-pool {
+            compatible = "shared-dma-pool";
+            size = <0x00000000 0x00100000>;
+            alignment = <0x00000000 0x00001000>;
+        };
+    };
+};
