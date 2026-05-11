@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+manifest_path="$repo_root/Cargo.toml"
+firmware_target="riscv64imac-unknown-none-elf"
+host_target=$(rustc -vV | sed -n 's/^host: //p')
+
+cd "$repo_root"
+
+echo "pre-commit: running clippy for firmware target"
+cargo clippy \
+    --manifest-path "$manifest_path" \
+    --target "$firmware_target" \
+    --bin rustfimware
+
+for host_bin in dtb_test ext4_test fat_test gpt_test memory_map_test print_test; do
+    echo "pre-commit: running clippy for $host_bin"
+    cargo clippy \
+        --manifest-path "$manifest_path" \
+        --features host-tools \
+        --target "$host_target" \
+        --bin "$host_bin"
+done

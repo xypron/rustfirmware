@@ -95,10 +95,15 @@ pub fn print_diagnostics(boot_hart: usize, device_tree: *const u8) {
 /// boot output stays compact while the detailed memory view remains available
 /// for future debugging.
 ///
+/// # Safety
+///
+/// `device_tree` must point at a readable flattened device tree blob whose
+/// backing storage remains valid for the duration of this call.
+///
 /// # Parameters
 ///
 /// - `device_tree`: Original device-tree pointer received in register `a1`.
-pub fn print_memory_layout(device_tree: *const u8) {
+pub unsafe fn print_memory_layout(device_tree: *const u8) {
     let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];

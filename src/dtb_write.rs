@@ -60,10 +60,15 @@ pub struct Dtb {
 impl Dtb {
     /// Creates one DTB object from a raw pointer.
     ///
+    /// # Safety
+    ///
+    /// `pointer` must point at a readable flattened device tree blob whose
+    /// backing storage remains valid for the lifetime of the returned object.
+    ///
     /// # Parameters
     ///
     /// - `pointer`: Pointer to the start of the device-tree blob.
-    pub fn from_ptr(pointer: *const u8) -> Result<Self, DtbError> {
+    pub unsafe fn from_ptr(pointer: *const u8) -> Result<Self, DtbError> {
         let total_size = unsafe { Fdt::from_ptr(pointer) }
             .map_err(DtbError::from)?
             .total_size_bytes();

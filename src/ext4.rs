@@ -410,7 +410,7 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
             .ok_or(Ext4Error::InvalidSuperblock)?;
         if block_size as usize > EXT4_MAX_BLOCK_SIZE
             || block_size < VIRTIO_SECTOR_SIZE as u32
-            || (block_size as usize % VIRTIO_SECTOR_SIZE) != 0
+            || !(block_size as usize).is_multiple_of(VIRTIO_SECTOR_SIZE)
         {
             return Err(Ext4Error::UnsupportedBlockSize(block_size));
         }
@@ -691,7 +691,7 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
                         .ok_or(Ext4Error::InvalidDirectoryEntry)? as usize;
 
                     if record_length < 8
-                        || record_length % 4 != 0
+                        || !record_length.is_multiple_of(4)
                         || entry_offset + record_length > block_size
                         || name_length > record_length - 8
                     {
@@ -764,7 +764,7 @@ impl<'a, D: BlockDevice> Ext4Volume<'a, D> {
                         .ok_or(Ext4Error::InvalidDirectoryEntry)? as usize;
 
                     if record_length < 8
-                        || record_length % 4 != 0
+                        || !record_length.is_multiple_of(4)
                         || entry_offset + record_length > block_size
                         || name_length > record_length - 8
                     {
@@ -1113,8 +1113,8 @@ fn read_device_bytes<D: BlockDevice>(
         return Ok(());
     }
 
-    if (byte_offset % VIRTIO_SECTOR_SIZE as u64) == 0
-        && (buffer.len() % VIRTIO_SECTOR_SIZE) == 0
+    if byte_offset.is_multiple_of(VIRTIO_SECTOR_SIZE as u64)
+        && buffer.len().is_multiple_of(VIRTIO_SECTOR_SIZE)
     {
         device.read_blocks(
             partition_start_lba + byte_offset / VIRTIO_SECTOR_SIZE as u64,

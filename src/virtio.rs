@@ -116,15 +116,20 @@ pub const VIRTQ_USED_F_NO_NOTIFY: u16 = 1;
 /// Probes QEMU VirtIO block devices, prints GPT partition information, and
 /// attempts Linux boot from boot-flagged partitions.
 ///
+/// # Safety
+///
+/// `device_tree_ptr` must point at a readable flattened device tree blob whose
+/// backing storage remains valid for the duration of the probe and any boot
+/// attempt it triggers.
+///
 /// # Parameters
 ///
 /// - `boot_hart`: Original hart identifier received in register `a0`.
 /// - `device_tree_ptr`: Original device-tree pointer received in register `a1`.
-pub fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
+pub unsafe fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
     let mut found_any = false;
-    let mut block_device_index = 0usize;
 
-    for probe in qemu_virt_block_devices() {
+    for (block_device_index, probe) in qemu_virt_block_devices().enumerate() {
         found_any = true;
         crate::println!(
             "virtio: block device at slot {} base {:#018x}",
@@ -133,7 +138,6 @@ pub fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
         );
 
         let current_block_device_index = block_device_index;
-        block_device_index += 1;
 
         let mut driver = match unsafe { VirtioBlockDriver::new(probe.device) } {
             Ok(driver) => driver,
@@ -169,9 +173,6 @@ pub fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
             let mut partition_type = [0u8; 36];
             let partition_start_lba = partition.first_lba();
             let bootable = partition.bootable();
-            // Partition entries borrow the GPT table, so drop that view before
-            // probing the same block device as FAT or ext4.
-            drop(partitions);
             let filesystem = detect_partition_filesystem(
                 &mut driver,
                 partition_start_lba,
@@ -195,15 +196,17 @@ pub fn probe_virtio(boot_hart: usize, device_tree_ptr: *const u8) {
             );
 
             if bootable {
-                linux_try_boot_from_partition(
-                    &mut driver,
-                    partition,
-                    filesystem,
-                    current_block_device_index,
-                    partition_index,
-                    boot_hart,
-                    device_tree_ptr,
-                );
+                unsafe {
+                    linux_try_boot_from_partition(
+                        &mut driver,
+                        partition,
+                        filesystem,
+                        current_block_device_index,
+                        partition_index,
+                        boot_hart,
+                        device_tree_ptr,
+                    );
+                }
             }
 
             // Reopen the GPT view after direct filesystem probing/loading so
@@ -684,7 +687,7 @@ impl BlockDevice for VirtioBlockDriver {
     }
 
     fn read_blocks(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), VirtioError> {
-        if buffer.is_empty() || (buffer.len() % VIRTIO_SECTOR_SIZE) != 0 {
+        if buffer.is_empty() || !buffer.len().is_multiple_of(VIRTIO_SECTOR_SIZE) {
             return Err(VirtioError::InvalidBufferLength);
         }
 

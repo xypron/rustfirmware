@@ -70,10 +70,10 @@ pub fn memory_regions(fdt: &Fdt<'_>, output: &mut [MemoryRegion]) -> usize {
             return true;
         }
 
-        if let Some(device_type) = fdt.get_property_string(node, "device_type") {
-            if device_type != "memory" {
-                return true;
-            }
+        if let Some(device_type) = fdt.get_property_string(node, "device_type")
+            && device_type != "memory"
+        {
+            return true;
         }
 
         if let Some(reg) = fdt.get_property(node, "reg") {

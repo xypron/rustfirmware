@@ -25,7 +25,7 @@ const RISCV_LINUX_HEADER_SIZE: usize = 64;
 /// Extra space reserved in the cloned Linux device tree.
 const LINUX_DTB_EXTRA_SIZE: usize = 8 * 1024;
 /// Deprecated RISC-V Linux boot header magic value, little-endian.
-const RISCV_LINUX_MAGIC: u64 = 0x5643_5349_52;
+const RISCV_LINUX_MAGIC: u64 = 0x0056_4353_4952;
 /// Required RISC-V Linux boot header second magic value, little-endian.
 const RISCV_LINUX_MAGIC2: u32 = 0x0543_5352;
 /// RISC-V Linux kernels must be loaded at a 2 MiB-aligned address.
@@ -256,7 +256,7 @@ fn initrd_candidate_path(index: usize) -> Option<BootPath> {
 /// - `partition_number`: One-based partition number within the GPT.
 /// - `boot_hart`: Original hart identifier received from OpenSBI.
 /// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
-pub fn try_boot_from_filesystem<F: FileSystem>(
+fn try_boot_from_filesystem<F: FileSystem>(
     volume: &mut F,
     filesystem_name: &str,
     allocator: &mut PageAllocator<'_>,
@@ -290,7 +290,7 @@ pub fn try_boot_from_filesystem<F: FileSystem>(
         return;
     };
 
-    let device_tree = match Dtb::from_ptr(device_tree_ptr) {
+    let device_tree = match unsafe { Dtb::from_ptr(device_tree_ptr) } {
         Ok(device_tree) => device_tree,
         Err(_) => {
             crate::println!("linux: invalid device-tree pointer");
@@ -340,6 +340,11 @@ pub fn try_boot_from_filesystem<F: FileSystem>(
 
 /// Tries the Linux boot method on one boot-flagged partition.
 ///
+/// # Safety
+///
+/// `device_tree_ptr` must point at a readable flattened device tree blob whose
+/// backing storage remains valid for the duration of this boot attempt.
+///
 /// # Parameters
 ///
 /// - `device`: Block device that contains the partition.
@@ -349,7 +354,7 @@ pub fn try_boot_from_filesystem<F: FileSystem>(
 /// - `partition_number`: One-based partition number within the GPT.
 /// - `boot_hart`: Original hart identifier received from OpenSBI.
 /// - `device_tree_ptr`: Boot-time device-tree pointer received from OpenSBI.
-pub fn try_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
+pub unsafe fn try_boot_from_partition<D: BlockDevice, P: PartitionEntry>(
     device: &mut D,
     partition: P,
     filesystem: DetectedFilesystem,
@@ -412,12 +417,14 @@ fn try_boot_from_volume<F: FileSystem>(
     let mut regions = [crate::dtb_memory::MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [crate::dtb_memory::MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
-    let mut allocator = match page_allocator_from_live_fdt(
-        device_tree_ptr,
-        &mut regions,
-        &mut reserved,
-        &mut memory_map,
-    ) {
+    let mut allocator = match unsafe {
+        page_allocator_from_live_fdt(
+            device_tree_ptr,
+            &mut regions,
+            &mut reserved,
+            &mut memory_map,
+        )
+    } {
         Some(allocator) => allocator,
         None => {
             crate::println!("linux: page allocator unavailable");
@@ -504,12 +511,12 @@ where
 /// - `allocator`: Page allocator used to clone the device tree for Linux.
 /// - `command_line`: Linux kernel command line.
 /// - `boot_hart`: Hart identifier passed in register `a0`.
-pub fn boot_and_start<'a>(
+pub fn boot_and_start(
     kernel_image: &LoadedFile,
     initrd: Option<(&str, &LoadedFile)>,
     device_tree: &Dtb,
     allocator: &mut PageAllocator<'_>,
-    command_line: &'a str,
+    command_line: &str,
     boot_hart: usize,
 ) -> Result<(), LinuxBootError> {
     let kernel_info = FileInfo::new(FileType::File, kernel_image.size_bytes());
@@ -579,6 +586,12 @@ pub fn check_kernel_header(
 /// The kernel entry receives the standard RISC-V Linux boot arguments:
 /// `a0 = boot_hart` and `a1 = updated_device_tree`.
 ///
+/// # Safety
+///
+/// `kernel_image` must reference executable kernel bytes at a valid entry
+/// address, and `updated_device_tree` must point at a readable DTB that stays
+/// valid after control transfers to the kernel.
+///
 /// # Parameters
 ///
 /// - `kernel_image`: Loaded kernel image whose base address is jumped to.
@@ -609,11 +622,11 @@ pub unsafe fn start(
 ///
 /// - `block_device_index`: Zero-based virtio block-device index.
 /// - `partition_number`: One-based partition number selected for boot.
-fn root_command_line<'a>(
+fn root_command_line(
     block_device_index: usize,
     partition_number: u32,
-    buffer: &'a mut [u8; 24],
-) -> Option<&'a str> {
+    buffer: &mut [u8; 24],
+) -> Option<&str> {
     if block_device_index >= 26 {
         return None;
     }

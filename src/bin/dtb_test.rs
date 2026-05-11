@@ -281,7 +281,7 @@ fn run_one_case(
 
     let input_bytes = fs::read(input_dtb)?;
     let input_buffer = OwnedAlignedBuffer::from_bytes(&input_bytes)?;
-    let input_tree = Dtb::from_ptr(input_buffer.as_ptr())
+    let input_tree = unsafe { Dtb::from_ptr(input_buffer.as_ptr()) }
         .map_err(|error| dtb_error("from_ptr", error))?;
 
     let mut allocator = PageAllocator::new();

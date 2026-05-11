@@ -575,9 +575,9 @@ impl<'a, D: BlockDevice> FatVolume<'a, D> {
             return Err(FatError::InvalidBootSector);
         }
 
-        let root_dir_sectors = ((root_dir_entries as u32 * FAT_DIR_ENTRY_SIZE as u32)
-            + (VIRTIO_SECTOR_SIZE as u32 - 1))
-            / VIRTIO_SECTOR_SIZE as u32;
+        let root_dir_sectors =
+            (root_dir_entries as u32 * FAT_DIR_ENTRY_SIZE as u32)
+                .div_ceil(VIRTIO_SECTOR_SIZE as u32);
         let root_dir_first_sector = reserved_sector_count as u32
             + fat_count as u32 * fat_size_sectors;
         let data_first_sector = root_dir_first_sector + root_dir_sectors;

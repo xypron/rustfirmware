@@ -45,6 +45,7 @@ pub(crate) struct SbiRet {
 /// - `arg5`: Value loaded into register `a5` before the call.
 /// - `fid`: SBI function identifier loaded into register `a6`.
 /// - `eid`: SBI extension identifier loaded into register `a7`.
+#[allow(clippy::too_many_arguments)]
 fn ecall(
     arg0: usize,
     arg1: usize,

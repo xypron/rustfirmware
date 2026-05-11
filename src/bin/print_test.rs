@@ -20,12 +20,14 @@ mod sbi {
     /// # Parameters
     ///
     /// - `message`: Text emitted by the shared formatter.
-    pub(crate) fn puts(message: &str) {
+    pub(crate) fn puts(message: &str) -> usize {
         std::print!("{}", message);
 
         let output = OUTPUT.get_or_init(|| Mutex::new(String::new()));
         let mut buffer = output.lock().unwrap();
         buffer.push_str(message);
+
+        message.len()
     }
 
     /// Clears the captured formatter output.

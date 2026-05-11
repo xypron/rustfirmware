@@ -53,6 +53,7 @@ pub type UINT32 = u32;
 /// EFI `UINT64` equivalent.
 pub type UINT64 = u64;
 /// EFI `UINTN` equivalent on this target.
+#[allow(clippy::upper_case_acronyms)]
 pub type UINTN = usize;
 /// EFI physical address type.
 pub type EFI_PHYSICAL_ADDRESS = u64;
@@ -173,13 +174,18 @@ pub const EMPTY_MEMORY_DESCRIPTOR: EFI_MEMORY_DESCRIPTOR =
 
 /// Builds a page allocator from the live boot-time device tree.
 ///
+/// # Safety
+///
+/// `device_tree_ptr` must point at a readable flattened device tree blob whose
+/// backing storage remains valid for the lifetime of the derived allocator.
+///
 /// # Parameters
 ///
 /// - `device_tree_ptr`: Pointer to the live flattened device tree.
 /// - `memory_regions`: Scratch slice that receives `/memory` ranges.
 /// - `reserved_regions`: Scratch slice that receives reserved ranges.
 /// - `descriptors`: Descriptor buffer that receives the EFI-style memory map.
-pub fn page_allocator_from_live_fdt<'a>(
+pub unsafe fn page_allocator_from_live_fdt<'a>(
     device_tree_ptr: *const u8,
     memory_regions: &mut [MemoryRegion],
     reserved_regions: &mut [MemoryRegion],

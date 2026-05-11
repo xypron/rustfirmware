@@ -153,12 +153,14 @@ fn try_relocate_firmware(
     let mut regions = [MemoryRegion { base: 0, size: 0 }; 8];
     let mut reserved = [MemoryRegion { base: 0, size: 0 }; 16];
     let mut memory_map = [EMPTY_MEMORY_DESCRIPTOR; 32];
-    let mut allocator = page_allocator_from_live_fdt(
-        device_tree,
-        &mut regions,
-        &mut reserved,
-        &mut memory_map,
-    )?;
+    let mut allocator = unsafe {
+        page_allocator_from_live_fdt(
+            device_tree,
+            &mut regions,
+            &mut reserved,
+            &mut memory_map,
+        )
+    }?;
 
     let runtime_base = firmware_runtime_base();
     let runtime_size = firmware_runtime_size();
@@ -281,9 +283,13 @@ fn run_firmware(
     greet();
     print_diagnostics(boot_hart, device_tree);
     if matches!(option_env!("RUSTFW_PRINT_MEMORY_LAYOUT"), Some("1")) {
-        print_memory_layout(device_tree);
+        unsafe {
+            print_memory_layout(device_tree);
+        }
     }
-    virtio::probe_virtio(boot_hart, device_tree);
+    unsafe {
+        virtio::probe_virtio(boot_hart, device_tree);
+    }
     crate::println!("rustfimware: poweroff via sbi srst");
     poweroff()
 }

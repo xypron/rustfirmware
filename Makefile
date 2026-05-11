@@ -22,7 +22,7 @@ QEMU_NETDEV_FLAGS := -netdev user,id=$(QEMU_NETDEV_ID)
 QEMU_VIRTIO_NET_FLAGS := -device virtio-net-device,netdev=$(QEMU_NETDEV_ID)
 QEMU_GDB_PORT := 1234
 
-.PHONY: all build build_diagnostic docs check debug clean gpt-test fat-test ext4-test
+.PHONY: all build build_diagnostic docs check debug clean gpt-test fat-test ext4-test install-hooks
 
 all: $(BIN)
 
@@ -91,6 +91,12 @@ fat-test:
 
 ext4-test:
 	cargo run --target $(HOST_TARGET) --features host-tools --bin ext4_test -- $(ARGS)
+
+install-hooks:
+	mkdir -p .githooks
+	chmod +x .githooks/pre-commit
+	git config core.hooksPath .githooks
+	@echo "git hooks installed from .githooks/"
 
 clean:
 	cargo clean

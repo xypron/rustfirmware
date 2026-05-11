@@ -119,7 +119,7 @@ impl BlockDevice for FileBlockDevice {
     }
 
     fn read_blocks(&mut self, sector: u64, buffer: &mut [u8]) -> Result<(), VirtioError> {
-        if buffer.is_empty() || (buffer.len() % VIRTIO_SECTOR_SIZE) != 0 {
+        if buffer.is_empty() || !buffer.len().is_multiple_of(VIRTIO_SECTOR_SIZE) {
             return Err(VirtioError::InvalidBufferLength);
         }
 

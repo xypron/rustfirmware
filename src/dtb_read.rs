@@ -256,6 +256,11 @@ impl<'a> Fdt<'a> {
     /// The caller must guarantee that `ptr_raw` points at a valid FDT blob in
     /// readable memory for the duration of the returned view.
     ///
+    /// # Safety
+    ///
+    /// `ptr_raw` must point at a readable flattened device tree blob whose
+    /// backing storage remains valid for the lifetime of the returned view.
+    ///
     /// # Parameters
     ///
     /// - `ptr_raw`: Raw pointer to the start of the flattened device tree blob.
@@ -352,7 +357,7 @@ impl<'a> Fdt<'a> {
         }
 
         let mut components = path.split('/');
-        if components.next()? != "" {
+        if !components.next()?.is_empty() {
             return None;
         }
 
