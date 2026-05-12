@@ -27,10 +27,12 @@ Install the required Ubuntu packages:
    sudo apt install -y make rustup llvm lld \
       binutils-riscv64-unknown-elf curl xz-utils
 
-Initialize Rust and add the target:
+Install the required Rust toolchain with ``rustup`` and add the firmware
+target:
 
 .. code-block:: bash
 
+   rustup toolchain install stable
    rustup default stable
    rustup target add riscv64imac-unknown-none-elf
 
